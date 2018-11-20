@@ -62,8 +62,9 @@ class ImagesDataSet(DataSet):
             images = images.astype('float64')
             # for every channel in image(assume this is last dimension)
             for i in range(images.shape[-1]):
-                images[:, :, :, i] = ((images[:, :, :, i] - self.images_means[i]) /
-                                       self.images_stds[i])
+                images[:, :, :, i] = ((images[:, :, :, i] -
+                                       self.images_means[i]) /
+                                      self.images_stds[i])
         else:
             raise Exception("Unknown type of normalization")
         return images
@@ -96,7 +97,7 @@ class DataProvider:
 
     def labels_to_one_hot(self, labels):
         """Convert 1D array of labels to one hot representation
-        
+
         Args:
             labels: 1D numpy array
         """
@@ -106,7 +107,7 @@ class DataProvider:
 
     def labels_from_one_hot(self, labels):
         """Convert 2D array of labels to 1D class based representation
-        
+
         Args:
             labels: 2D numpy array
         """

@@ -113,7 +113,12 @@ class SVHNDataProvider(DataProvider):
     def get_images_and_labels(self, name_part, one_hot=False):
         url = self.data_url + name_part + '_32x32.mat'
         download_data_url(url, self.save_path)
+
         filename = os.path.join(self.save_path, name_part + '_32x32.mat')
+        # In case the file was downloaded but not extracted
+        if not os.path.exists(filename):
+            extract_data(self.save_path)
+
         data = scipy.io.loadmat(filename)
         images = data['X'].transpose(3, 0, 1, 2)
         labels = data['y'].reshape((-1))

@@ -7,12 +7,17 @@ import numpy as np
 import tensorflow as tf
 
 
-TF_VERSION = float('.'.join(tf.__version__.split('.')[:2]))
+TF_VERSION = list(map(int, tf.__version__.split('.')[:2]))
 
 
 class DenseNet:
-    def __init__(self, data_provider, growth_rate, depth,
-                 total_blocks, keep_prob, num_inter_threads, num_intra_threads,
+
+    # -------------------------------------------------------------------------
+    # ----------------------------CLASS INITIALIZER----------------------------
+    # -------------------------------------------------------------------------
+
+    def __init__(self, data_provider, growth_rate, layer_num_list,
+                 keep_prob, num_inter_threads, num_intra_threads,
                  weight_decay, nesterov_momentum, model_type, dataset,
                  should_save_logs, should_save_model,
                  renew_logs=False,
@@ -20,55 +25,57 @@ class DenseNet:
                  bc_mode=False,
                  **kwargs):
         """
-        Class to implement networks from this paper
+        Class to implement DenseNet networks as defined in this paper:
         https://arxiv.org/pdf/1611.05552.pdf
 
         Args:
-            data_provider: Class, that have all required data sets
-            growth_rate: `int`, variable from paper
-            depth: `int`, variable from paper
-            total_blocks: `int`, paper value == 3
+            data_provider: data provider object for the required data set
+            growth_rate: `int`, number of new convolutions per dense layer
+            layer_num_list: `str`, list of number of layers in each block,
+                separated by commas (example: '12,12,12')
             keep_prob: `float`, keep probability for dropout. If keep_prob = 1
-                dropout will be disables
+                dropout will be disabled
             weight_decay: `float`, weight decay for L2 loss, paper = 1e-4
             nesterov_momentum: `float`, momentum for Nesterov optimizer
-            model_type: `str`, 'DenseNet' or 'DenseNet-BC'. Should model use
-                bottle neck connections or not.
+            model_type: `str`, model type name ('DenseNet' or 'DenseNet-BC'),
+                should we use bottleneck layers and compression or not.
             dataset: `str`, dataset name
             should_save_logs: `bool`, should logs be saved or not
-            should_save_model: `bool`, should model be saved or not
+            should_save_model: `bool`, should the model be saved or not
             renew_logs: `bool`, remove previous logs for current model
-            reduction: `float`, reduction Theta at transition layer for
-                DenseNets with bottleneck layers. See paragraph 'Compression'
-                https://arxiv.org/pdf/1608.06993v3.pdf#4
-            bc_mode: `bool`, should we use bottleneck layers and features
-                reduction or not.
+            reduction: `float`, reduction (theta) at transition layers for
+                DenseNets with compression (DenseNet-BC)
+            bc_mode: `bool`, boolean equivalent of model_type, should we use
+                bottleneck layers and compression (DenseNet-BC) or not.
         """
         self.data_provider = data_provider
         self.data_shape = data_provider.data_shape
         self.n_classes = data_provider.n_classes
-        self.depth = depth
         self.growth_rate = growth_rate
         self.num_inter_threads = num_inter_threads
         self.num_intra_threads = num_intra_threads
-        # how many features will be received after first convolution
-        # value the same as in the original Torch code
+        # number of outputs (feature maps) produced by the initial convolution
+        # (2*k, same value as in the original Torch code)
         self.first_output_features = growth_rate * 2
-        self.total_blocks = total_blocks
-        self.layers_per_block = (depth - (total_blocks + 1)) // total_blocks
+        self.layer_num_list = list(map(int, layer_num_list.split(',')))
+        self.total_blocks = len(self.layer_num_list)
         self.bc_mode = bc_mode
-        # compression rate at the transition layers
         self.reduction = reduction
+
+        print("Build %s model with %d blocks, "
+              "The number of layers in each block is:" % (
+                  model_type, self.total_blocks))
         if not bc_mode:
-            print("Build %s model with %d blocks, "
-                  "%d composite layers each." % (
-                      model_type, self.total_blocks, self.layers_per_block))
+            print('\n'.join('Block %d: %d composite layers.' % (
+                k, self.layer_num_list[k]) for k in range(len(
+                    self.layer_num_list))))
         if bc_mode:
-            self.layers_per_block = self.layers_per_block // 2
-            print("Build %s model with %d blocks, "
-                  "%d bottleneck layers and %d composite layers each." % (
-                      model_type, self.total_blocks, self.layers_per_block,
-                      self.layers_per_block))
+            self.layer_num_list[:] = [-(-l // 2) for l in self.layer_num_list]
+            print('\n'.join('Block %d: %d bottleneck layers and %d composite'
+                            'layers.' % (k, self.layer_num_list[k],
+                                         self.layer_num_list[k])
+                            for k in range(len(self.layer_num_list))))
+
         print("Reduction at transition layers: %.1f" % self.reduction)
 
         self.keep_prob = keep_prob
@@ -86,69 +93,79 @@ class DenseNet:
         self._initialize_session()
         self._count_trainable_params()
 
-    def _initialize_session(self):
-        """Initialize session, variables, saver"""
-        config = tf.ConfigProto()
+    # -------------------------------------------------------------------------
+    # -----------------------SAVING AND LOADING A MODEL------------------------
+    # -------------------------------------------------------------------------
 
-        # Specify the CPU inter and Intra threads used by MKL
-        config.intra_op_parallelism_threads = self.num_intra_threads
-        config.inter_op_parallelism_threads = self.num_inter_threads
+    def update_paths(self):
+        """
+        Update _save_path and _logs_path to use their proper values.
+        This is used after the graph is modified (new block or layer).
+        This is also used after an AttributeError when calling these paths.
+        """
+        save_path = 'saves/%s' % self.model_identifier
+        os.makedirs(save_path, exist_ok=True)
+        save_path = os.path.join(save_path, 'model.chkpt')
+        self._save_path = save_path
 
-        # restrict model GPU memory utilization to min required
-        config.gpu_options.allow_growth = True
-        self.sess = tf.Session(config=config)
-        tf_ver = int(tf.__version__.split('.')[1])
-        if TF_VERSION <= 0.10:
-            self.sess.run(tf.initialize_all_variables())
-            logswriter = tf.train.SummaryWriter
-        else:
-            self.sess.run(tf.global_variables_initializer())
-            logswriter = tf.summary.FileWriter
-        self.saver = tf.train.Saver()
-        self.summary_writer = logswriter(self.logs_path)
+        logs_path = 'logs/%s' % self.model_identifier
+        if self.renew_logs:
+            shutil.rmtree(logs_path, ignore_errors=True)
+        os.makedirs(logs_path, exist_ok=True)
+        self._logs_path = logs_path
 
-    def _count_trainable_params(self):
-        total_parameters = 0
-        for variable in tf.trainable_variables():
-            shape = variable.get_shape()
-            variable_parametes = 1
-            for dim in shape:
-                variable_parametes *= dim.value
-            total_parameters += variable_parametes
-        print("Total training params: %.1fM" % (total_parameters / 1e6))
+        return save_path, logs_path
+
+    @property
+    def model_identifier(self):
+        """
+        Returns an identifier `str` for the current DenseNet model.
+        It gives the model's type ('DenseNet' or 'DenseNet-BC'),
+        its growth rate k, the number of layers in each block,
+        and the dataset that was used.
+        """
+        return "{}_growth_rate={}_layer_num_list={}_dataset_{}".format(
+            self.model_type, self.growth_rate, ",".join(map(
+                str, self.layer_num_list)), self.dataset_name)
 
     @property
     def save_path(self):
+        """
+        Returns a path where the saver should save the current model.
+        """
         try:
             save_path = self._save_path
         except AttributeError:
-            save_path = 'saves/%s' % self.model_identifier
-            os.makedirs(save_path, exist_ok=True)
-            save_path = os.path.join(save_path, 'model.chkpt')
-            self._save_path = save_path
+            save_path = self.update_paths()[0]
         return save_path
 
     @property
     def logs_path(self):
+        """
+        Returns a path where the logs for the current model should be written.
+        """
         try:
             logs_path = self._logs_path
         except AttributeError:
-            logs_path = 'logs/%s' % self.model_identifier
-            if self.renew_logs:
-                shutil.rmtree(logs_path, ignore_errors=True)
-            os.makedirs(logs_path, exist_ok=True)
-            self._logs_path = logs_path
+            logs_path = self.update_paths()[1]
         return logs_path
 
-    @property
-    def model_identifier(self):
-        return "{}_growth_rate={}_depth={}_dataset_{}".format(
-            self.model_type, self.growth_rate, self.depth, self.dataset_name)
-
     def save_model(self, global_step=None):
+        """
+        Saves the current trained model at the proper path, using the saver.
+
+        Args:
+            global_step: `int` or None, used for numbering saved model files
+        """
         self.saver.save(self.sess, self.save_path, global_step=global_step)
 
     def load_model(self):
+        """
+        Loads a saved model to use (instead of a new one) using the saver.
+        This is a previously trained and saved model using the model_type
+        ('DenseNet' or 'DenseNet-BC'), growth rate, layers in each block,
+        and dataset that was specified in the program arguments.
+        """
         try:
             self.saver.restore(self.sess, self.save_path)
         except Exception as e:
@@ -159,6 +176,17 @@ class DenseNet:
 
     def log_loss_accuracy(self, loss, accuracy, epoch, prefix,
                           should_print=True):
+        """
+        Writes a log of the current mean loss (cross_entropy) and accuracy.
+
+        Args:
+            loss: tensor providing the loss (cross_entropy)
+            accuracy: tensor providing the accuracy
+            epoch: `int`, current training epoch (or batch)
+            prefix: `str`, are these logs per batch ('per_batch'), per
+                training epoch ('train') or per validation epoch ('valid')
+            should_print: `bool`, should we print this log on console or not
+        """
         if should_print:
             print("mean cross_entropy: %f, mean accuracy: %f" % (
                 loss, accuracy))
@@ -170,7 +198,15 @@ class DenseNet:
         ])
         self.summary_writer.add_summary(summary, epoch)
 
+    # -------------------------------------------------------------------------
+    # -----------------------DEFINING INPUT PLACEHOLDERS-----------------------
+    # -------------------------------------------------------------------------
+
     def _define_inputs(self):
+        """
+        Defines some imput placeholder tensors:
+        images, labels, learning_rate, is_training.
+        """
         shape = [None]
         shape.extend(self.data_shape)
         self.images = tf.placeholder(
@@ -187,108 +223,36 @@ class DenseNet:
             name='learning_rate')
         self.is_training = tf.placeholder(tf.bool, shape=[])
 
-    def composite_function(self, _input, out_features, kernel_size=3):
-        """Function from paper H_l that performs:
-        - batch normalization
-        - ReLU nonlinearity
-        - convolution with required kernel
-        - dropout, if required
+    # -------------------------------------------------------------------------
+    # -----------------------BUILDING THE DENSENET GRAPH-----------------------
+    # -------------------------------------------------------------------------
+
+    # SIMPLEST OPERATIONS -----------------------------------------------------
+    # -------------------------------------------------------------------------
+
+    def weight_variable_msra(self, shape, name):
         """
-        with tf.variable_scope("composite_function"):
-            # BN
-            output = self.batch_norm(_input)
-            # ReLU
-            output = tf.nn.relu(output)
-            # convolution
-            output = self.conv2d(
-                output, out_features=out_features, kernel_size=kernel_size)
-            # dropout(in case of training and in case it is no 1.0)
-            output = self.dropout(output)
-        return output
+        Creates weights for a fully-connected layer, using an initialization
+        method which does not scale the variance.
 
-    def bottleneck(self, _input, out_features):
-        with tf.variable_scope("bottleneck"):
-            output = self.batch_norm(_input)
-            output = tf.nn.relu(output)
-            inter_features = out_features * 4
-            output = self.conv2d(
-                output, out_features=inter_features, kernel_size=1,
-                padding='VALID')
-            output = self.dropout(output)
-        return output
-
-    def add_internal_layer(self, _input, growth_rate):
-        """Perform H_l composite function for the layer and after concatenate
-        input with output from composite function.
+        Args:
+            shape: `list` of `int`, shape of the weight matrix
+            name: `str`, a name for identifying the weight matrix
         """
-        # call composite function with 3x3 kernel
-        if not self.bc_mode:
-            comp_out = self.composite_function(
-                _input, out_features=growth_rate, kernel_size=3)
-        elif self.bc_mode:
-            bottleneck_out = self.bottleneck(_input, out_features=growth_rate)
-            comp_out = self.composite_function(
-                bottleneck_out, out_features=growth_rate, kernel_size=3)
-        # concatenate _input with out from composite function
-        if TF_VERSION >= 1.0:
-            output = tf.concat(axis=3, values=(_input, comp_out))
-        else:
-            output = tf.concat(3, (_input, comp_out))
-        return output
-
-    def add_block(self, _input, growth_rate, layers_per_block):
-        """Add N H_l internal layers"""
-        output = _input
-        for layer in range(layers_per_block):
-            with tf.variable_scope("layer_%d" % layer):
-                output = self.add_internal_layer(output, growth_rate)
-        return output
-
-    def transition_layer(self, _input):
-        """Call H_l composite function with 1x1 kernel and after average
-        pooling
-        """
-        # call composite function with 1x1 kernel
-        out_features = int(int(_input.get_shape()[-1]) * self.reduction)
-        output = self.composite_function(
-            _input, out_features=out_features, kernel_size=1)
-        # run average pooling
-        output = self.avg_pool(output, k=2)
-        return output
-
-    def transition_layer_to_classes(self, _input):
-        """This is last transition to get probabilities by classes. It perform:
-        - batch normalization
-        - ReLU nonlinearity
-        - wide average pooling
-        - FC layer multiplication
-        """
-        # BN
-        output = self.batch_norm(_input)
-        # ReLU
-        output = tf.nn.relu(output)
-        # average pooling
-        last_pool_kernel = int(output.get_shape()[-2])
-        output = self.avg_pool(output, k=last_pool_kernel)
-        # FC
-        features_total = int(output.get_shape()[-1])
-        output = tf.reshape(output, [-1, features_total])
-        W = self.weight_variable_xavier(
-            [features_total, self.n_classes], name='W')
-        bias = self.bias_variable([self.n_classes])
-        logits = tf.matmul(output, W) + bias
-        return logits
-
-    def conv2d(self, _input, out_features, kernel_size,
-               strides=[1, 1, 1, 1], padding='SAME'):
-        in_features = int(_input.get_shape()[-1])
-        kernel = self.weight_variable_msra(
-            [kernel_size, kernel_size, in_features, out_features],
-            name='kernel')
-        output = tf.nn.conv2d(_input, kernel, strides, padding)
-        return output
+        return tf.get_variable(
+            name=name,
+            shape=shape,
+            initializer=tf.contrib.layers.variance_scaling_initializer())
 
     def avg_pool(self, _input, k):
+        """
+        Performs average pooling on a given input (_input),
+        within square kernels of side k and stride k.
+
+        Args:
+            _input: tensor, the operation's input
+            k: `int`, the size and stride for the kernels
+        """
         ksize = [1, k, k, 1]
         strides = [1, k, k, 1]
         padding = 'VALID'
@@ -296,12 +260,46 @@ class DenseNet:
         return output
 
     def batch_norm(self, _input):
+        """
+        Performs batch normalization on a given input (_input).
+
+        Args:
+            _input: tensor, the operation's input
+        """
         output = tf.contrib.layers.batch_norm(
             _input, scale=True, is_training=self.is_training,
             updates_collections=None)
         return output
 
+    def conv2d(self, _input, out_features, kernel_size,
+               strides=[1, 1, 1, 1], padding='SAME'):
+        """
+        Creates a 2D convolutional layer (applies a certain number of
+        kernels on some input features to obtain output features).
+
+        Args:
+            _input: tensor, the operation's input
+            out_features: `int`, number of feature maps at the output
+            kernel_size: `int`, size of the square kernels (their side)
+            strides: `list` of `int`, strides in each direction for kernels
+            padding: `str`, should we use padding ('SAME') or not ('VALID')
+        """
+        in_features = int(_input.get_shape()[-1])
+        kernel = self.weight_variable_msra(
+            [kernel_size, kernel_size, in_features, out_features],
+            name='kernel')
+        output = tf.nn.conv2d(_input, kernel, strides, padding)
+        return output
+
     def dropout(self, _input):
+        """
+        If the given keep_prob is not 1 AND if the graph is being trained,
+        performs a random dropout operation on a given input (_input).
+        The dropout probability is the keep_prob parameter.
+
+        Args:
+            _input: tensor, the operation's input
+        """
         if self.keep_prob < 1:
             output = tf.cond(
                 self.is_training,
@@ -312,70 +310,506 @@ class DenseNet:
             output = _input
         return output
 
-    def weight_variable_msra(self, shape, name):
-        return tf.get_variable(
-            name=name,
-            shape=shape,
-            initializer=tf.contrib.layers.variance_scaling_initializer())
+    # SIMPLEST OPERATIONS (FULLY CONNECTED)------------------------------------
+    # -------------------------------------------------------------------------
 
     def weight_variable_xavier(self, shape, name):
+        """
+        Creates weights for a fully-connected layer, using the Xavier
+        initializer (keeps gradient scale roughly the same in all layers).
+
+        Args:
+            shape: `list` of `int`, shape of the weight matrix
+            name: `str`, a name for identifying the weight matrix
+        """
         return tf.get_variable(
             name,
             shape=shape,
             initializer=tf.contrib.layers.xavier_initializer())
 
     def bias_variable(self, shape, name='bias'):
+        """
+        Creates bias terms for a fully-connected layer, initialized to 0.0.
+
+        Args:
+            shape: `list` of `int`, shape of the bias matrix
+            name: `str`, a name for identifying the bias matrix
+        """
         initial = tf.constant(0.0, shape=shape)
         return tf.get_variable(name, initializer=initial)
 
-    def _build_graph(self):
-        growth_rate = self.growth_rate
-        layers_per_block = self.layers_per_block
-        # first - initial 3 x 3 conv to first_output_features
-        with tf.variable_scope("Initial_convolution"):
+    # COMPOSITE FUNCTION + BOTTLENECK -----------------------------------------
+    # -------------------------------------------------------------------------
+
+    def composite_function(self, _input, out_features, kernel_size=3):
+        """
+        Function H_l. Takes a concatenation of previous outputs and performs:
+        - batch normalization
+        - ReLU activation function
+        - 2d convolution, with required kernel size (side)
+        - dropout, if required (training the graph and keep_prob not set to 1)
+
+        Args:
+            _input: tensor, the operation's input
+            out_features: `int`, number of feature maps at the output
+            kernel_size: `int`, size of the square kernels (their side)
+        """
+        with tf.variable_scope("composite_function"):
+            # batch normalization
+            output = self.batch_norm(_input)
+            # ReLU activation function
+            output = tf.nn.relu(output)
+            # 2d convolution
             output = self.conv2d(
-                self.images,
-                out_features=self.first_output_features,
-                kernel_size=3)
+                output, out_features=out_features, kernel_size=kernel_size)
+            # dropout (if the graph is being trained and keep_prob is not 1)
+            output = self.dropout(output)
+        return output
 
-        # add N required blocks
-        for block in range(self.total_blocks):
-            with tf.variable_scope("Block_%d" % block):
-                output = self.add_block(output, growth_rate, layers_per_block)
-            # last block exist without transition layer
-            if block != self.total_blocks - 1:
-                with tf.variable_scope("Transition_after_block_%d" % block):
-                    output = self.transition_layer(output)
+    def bottleneck(self, _input, out_features):
+        """
+        Bottleneck function, used before composite function H_l in DenseNet-BC,
+        takes a concatenation of previous outputs and performs:
+        - batch normalization
+        - ReLU activation function
+        - 2d convolution, with kernel size 1 (produces 4x the features of H_l)
+        - dropout, if required (training the graph and keep_prob not set to 1)
 
-        with tf.variable_scope("Transition_to_classes"):
-            logits = self.transition_layer_to_classes(output)
+        Args:
+            _input: tensor, the operation's input
+            out_features: `int`, number of feature maps at the output of H_l
+            kernel_size: `int`, size of the square kernels (their side)
+        """
+        with tf.variable_scope("bottleneck"):
+            # batch normalization
+            output = self.batch_norm(_input)
+            # ReLU activation function
+            output = tf.nn.relu(output)
+            inter_features = out_features * 4
+            # 2d convolution (produces intermediate features)
+            output = self.conv2d(
+                output, out_features=inter_features, kernel_size=1,
+                padding='VALID')
+            # dropout (if the graph is being trained and keep_prob is not 1)
+            output = self.dropout(output)
+        return output
+
+    # BLOCKS AND THEIR INTERNAL LAYERS ----------------------------------------
+    # -------------------------------------------------------------------------
+
+    def add_internal_layer(self, _input, growth_rate):
+        """
+        Adds a new convolutional (dense) layer within a block.
+        This layer will perform the composite function H_l([x_0, ..., x_l-1])
+        to obtain its output x_l.
+        It will then concatenate x_l with the layer's input: all the outputs of
+        the previous layers, resulting in [x_0, ..., x_l-1, x_l].
+
+        Args:
+            _input: tensor, the operation's input
+            growth_rate: `int`, number of new convolutions per dense layer
+        """
+        # use the composite function H_l (3x3 kernel conv)
+        if not self.bc_mode:
+            comp_out = self.composite_function(
+                _input, out_features=growth_rate, kernel_size=3)
+        # in DenseNet-BC mode, add a bottleneck layer before H_l (1x1 conv)
+        elif self.bc_mode:
+            bottleneck_out = self.bottleneck(_input, out_features=growth_rate)
+            comp_out = self.composite_function(
+                bottleneck_out, out_features=growth_rate, kernel_size=3)
+        # concatenate output from H_l with layer input (all previous outputs)
+        if TF_VERSION[0] >= 1 and TF_VERSION[1] >= 0:
+            output = tf.concat(axis=3, values=(_input, comp_out))
+        else:
+            output = tf.concat(3, (_input, comp_out))
+        return output
+
+    def add_block(self, _input, growth_rate, layers_in_block):
+        """
+        Adds a new block containing several convolutional (dense) layers.
+        These are connected together following a DenseNet architecture,
+        as defined in the paper.
+
+        Args:
+            _input: tensor, the operation's input
+            growth_rate: `int`, number of new convolutions per dense layer
+            layers_in_block: `int`, number of dense layers in this block
+        """
+        output = _input
+        for layer in range(layers_in_block):
+            with tf.variable_scope("layer_%d" % layer):
+                output = self.add_internal_layer(output, growth_rate)
+        return output
+
+    # TRANSITION LAYERS -------------------------------------------------------
+    # -------------------------------------------------------------------------
+
+    def transition_layer(self, _input):
+        """
+        Adds a new transition layer after a block. This layer's inputs are the
+        concatenated feature maps of each layer in the block.
+        The layer first runs the composite function with kernel size 1:
+        - In DenseNet mode, it produces as many feature maps as the input had.
+        - In DenseNet-BC mode, it produces reduction (theta) times as many,
+          compressing the output.
+        Afterwards, an average pooling operation (of size 2) is carried to
+        change the output's size.
+
+        Args:
+            _input: tensor, the operation's input
+        """
+        # add feature map compression in DenseNet-BC mode
+        out_features = int(int(_input.get_shape()[-1]) * self.reduction)
+        # use the composite function H_l (1x1 kernel conv)
+        output = self.composite_function(
+            _input, out_features=out_features, kernel_size=1)
+        # use average pooling to reduce feature map size
+        output = self.avg_pool(output, k=2)
+        return output
+
+    def transition_layer_to_classes(self, _input):
+        """
+        Adds the transition layer after the last block. This layer outputs the
+        estimated probabilities by classes. It performs:
+        - batch normalization
+        - ReLU activation function
+        - wider-than-normal average pooling
+        - reshaping the output into a 1D tensor
+        - fully-connected layer (matrix multiplication, weights and biases)
+
+        Args:
+            _input: tensor, the operation's input
+        """
+        # batch normalization
+        output = self.batch_norm(_input)
+        # ReLU activation function
+        output = tf.nn.relu(output)
+        # wide average pooling
+        last_pool_kernel = int(output.get_shape()[-2])
+        output = self.avg_pool(output, k=last_pool_kernel)
+        # reshaping the output into 1D
+        features_total = int(output.get_shape()[-1])
+        output = tf.reshape(output, [-1, features_total])
+        # fully-connected layer
+        W = self.weight_variable_xavier(
+            [features_total, self.n_classes], name='W')
+        bias = self.bias_variable([self.n_classes])
+        logits = tf.matmul(output, W) + bias
+        return logits
+
+    # MAIN GRAPH BUILDING FUNCTION --------------------------------------------
+    # -------------------------------------------------------------------------
+
+    def _new_layer(self):
+        """
+        Add a new layer at the end of the current last block.
+        In DenseNet-BC mode, two layers (bottleneck and compression) will be
+        added instead of just one.
+        """
+        with tf.variable_scope("Block_%d" % (self.total_blocks-1)):
+            with tf.variable_scope("layer_%d" % self.layer_num_list[-1]):
+                self.output = self.add_internal_layer(
+                    self.output, self.growth_rate)
+        self.layer_num_list[-1] += 1
+
+        if not self.bc_mode:
+            print("Added a new layer to the last block (#%d)! "
+                  "It now has got %d layers" %
+                  (self.total_blocks-1, self.layer_num_list[-1]))
+        if self.bc_mode:
+            print("Added a new pair of layers to the last block (#%d)! "
+                  "It now has got %d bottleneck and composite layers" %
+                  (self.total_blocks-1, self.layer_num_list[-1]))
+
+        self.update_paths()
+        self._define_end_graph_operations()
+        self._initialize_uninitialized_variables()
+
+    def _new_block(self):
+        """
+        Add a transition layer, and a new block (with one layer) at the end
+        of the current last block.
+        In DenseNet-BC mode, the new module will begin with two layers
+        (bottleneck and compression) instead of just one.
+        """
+        with tf.variable_scope("Transition_after_block_%d" %
+                               (self.total_blocks-1)):
+            self.output = self.transition_layer(self.output)
+        with tf.variable_scope("Block_%d" % self.total_blocks):
+            self.output = self.add_block(self.output, self.growth_rate, 1)
+        self.layer_num_list.append(1)
+        self.total_blocks += 1
+
+        print("Added a new block (#%d), "
+              "The number of layers is now:" % (self.total_blocks-1))
+        if not self.bc_mode:
+            print('\n'.join('Block %d: %d composite layers.' % (
+                k, self.layer_num_list[k]) for k in range(len(
+                    self.layer_num_list))))
+        if self.bc_mode:
+            print('\n'.join('Block %d: %d bottleneck layers and %d composite'
+                            'layers.' % (k, self.layer_num_list[k],
+                                         self.layer_num_list[k])
+                            for k in range(len(self.layer_num_list))))
+
+        self.update_paths()
+        self._define_end_graph_operations()
+        self._initialize_uninitialized_variables()
+
+    def _define_end_graph_operations(self):
+        """
+        Adds the last layer on top of the (editable portion of the) graph.
+        Then (re)defines the operations for cross entropy, the training step,
+        and the accuracy.
+        """
+        # add the FC transition layer to the classes (+ softmax).
+        with tf.variable_scope("Transition_to_classes_block_%d_layer_%d" %
+                               (self.total_blocks-1,
+                                self.layer_num_list[-1]-1)):
+            logits = self.transition_layer_to_classes(self.output)
         prediction = tf.nn.softmax(logits)
 
-        # Losses
-        cross_entropy = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(
-            logits=logits, labels=self.labels))
+        # set the calculation for the losses (cross_entropy and l2_loss)
+        if TF_VERSION[0] >= 1 and TF_VERSION[1] >= 5:
+            cross_entropy = tf.reduce_mean(
+                tf.nn.softmax_cross_entropy_with_logits_v2(logits=logits,
+                                                           labels=self.labels))
+        else:
+            cross_entropy = tf.reduce_mean(
+                tf.nn.softmax_cross_entropy_with_logits(logits=logits,
+                                                        labels=self.labels))
+
         self.cross_entropy = cross_entropy
         l2_loss = tf.add_n(
             [tf.nn.l2_loss(var) for var in tf.trainable_variables()])
 
-        # optimizer and train step
+        # set the optimizer and define the training step
         optimizer = tf.train.MomentumOptimizer(
             self.learning_rate, self.nesterov_momentum, use_nesterov=True)
         self.train_step = optimizer.minimize(
             cross_entropy + l2_loss * self.weight_decay)
 
+        # set the calculation for the accuracy
         correct_prediction = tf.equal(
             tf.argmax(prediction, 1),
             tf.argmax(self.labels, 1))
         self.accuracy = tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
 
+    def _build_graph(self):
+        """
+        Gets the growth rate and the layers per block.
+        Then builds the graph and defines the operations for:
+        cross entropy (also l2_loss and a momentum optimizer),
+        training step (minimize momentum optimizer using l2_loss + cross entr),
+        accuracy (reduce mean).
+        """
+        growth_rate = self.growth_rate
+        layers_in_each_block = self.layer_num_list
+        self.output = self.images
+
+        # first add a 3x3 convolution layer with first_output_features outputs
+        with tf.variable_scope("Initial_convolution"):
+            self.output = self.conv2d(self.output,
+                                      out_features=self.first_output_features,
+                                      kernel_size=3)
+
+        # then add the required blocks
+        for block in range(self.total_blocks):
+            with tf.variable_scope("Block_%d" % block):
+                self.output = self.add_block(self.output, growth_rate,
+                                             layers_in_each_block[block])
+            #  all blocks except the last have transition layers
+            if block != self.total_blocks - 1:
+                with tf.variable_scope("Transition_after_block_%d" % block):
+                    self.output = self.transition_layer(self.output)
+
+        self._define_end_graph_operations()
+
+    # -------------------------------------------------------------------------
+    # -------------------INITIALIZING THE TENSORFLOW SESSION-------------------
+    # -------------------------------------------------------------------------
+
+    def _initialize_uninitialized_variables(self):
+        """
+        Finds the references to all uninitialized variables, then tells
+        TensorFlow to initialize these variables.
+        """
+        # get a set with all the names of uninitialized variables
+        uninit_varnames = list(map(str, self.sess.run(
+            tf.report_uninitialized_variables())))
+        uninit_vars = []
+        # for every variable, check if its name is in the uninitialized set
+        for var in tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES):
+            varname = 'b\'' + var.name.split(':')[0] + '\''
+            if varname in uninit_varnames:
+                uninit_vars.append(var)
+        # initialize all the new variables
+        self.sess.run(tf.variables_initializer(uninit_vars))
+
+    def _initialize_all_variables(self):
+        """
+        Tells TensorFlow to initialize all variables, using the proper method
+        for the TensorFlow version.
+        """
+        if TF_VERSION[0] >= 0 and TF_VERSION[1] >= 10:
+            self.sess.run(tf.global_variables_initializer())
+        else:
+            self.sess.run(tf.initialize_all_variables())
+
+    def _initialize_session(self):
+        """
+        Starts a TensorFlow session with the correct configuration.
+        Then tells TensorFlow to initialize all variables, create a saver
+        and a log file writer.
+        """
+        config = tf.ConfigProto()
+
+        # specify the CPU inter and intra threads used by MKL
+        config.intra_op_parallelism_threads = self.num_intra_threads
+        config.inter_op_parallelism_threads = self.num_inter_threads
+
+        # restrict model GPU memory utilization to the minimum required
+        config.gpu_options.allow_growth = True
+        self.sess = tf.Session(config=config)
+
+        # initialize variables, create saver, create log file writer
+        self._initialize_all_variables()
+        if TF_VERSION[0] >= 0 and TF_VERSION[1] >= 10:
+            logswriter = tf.summary.FileWriter
+        else:
+            logswriter = tf.train.SummaryWriter
+        self.saver = tf.train.Saver()
+        self.summary_writer = logswriter(self.logs_path)
+
+    # -------------------------------------------------------------------------
+    # --------------------COUNTING ALL TRAINABLE PARAMETERS--------------------
+    # -------------------------------------------------------------------------
+
+    def _count_trainable_params(self):
+        """
+        Uses TensorFlow commands to count the number of trainable parameters
+        in the graph (sum of the multiplied dimensions of each TF variable).
+        Then prints the number of parameters.
+        """
+        total_parameters = 0
+        for variable in tf.trainable_variables():
+            shape = variable.get_shape()
+            variable_parametes = 1
+            for dim in shape:
+                variable_parametes *= dim.value
+            total_parameters += variable_parametes
+        print("Total trainable params: %.1fM" % (total_parameters / 1e6))
+
+    # -------------------------------------------------------------------------
+    # ---------------------TRAINING AND TESTING THE MODEL----------------------
+    # -------------------------------------------------------------------------
+
+    def train_one_epoch(self, data, batch_size, learning_rate):
+        """
+        Trains the model for one epoch using data from the proper training set.
+
+        Args:
+            data: training data yielded by the dataset's data provider
+            batch_size: `int`, number of examples in a training batch
+            learning_rate: `int`, learning rate for the optimizer
+        """
+        num_examples = data.num_examples
+        total_loss = []
+        total_accuracy = []
+
+        # save each training batch's loss and accuracy
+        for i in range(num_examples // batch_size):
+            batch = data.next_batch(batch_size)
+            images, labels = batch
+            feed_dict = {
+                self.images: images,
+                self.labels: labels,
+                self.learning_rate: learning_rate,
+                self.is_training: True,
+            }
+            fetches = [self.train_step, self.cross_entropy, self.accuracy]
+            result = self.sess.run(fetches, feed_dict=feed_dict)
+            _, loss, accuracy = result
+            total_loss.append(loss)
+            total_accuracy.append(accuracy)
+            if self.should_save_logs:
+                self.batches_step += 1
+                self.log_loss_accuracy(
+                    loss, accuracy, self.batches_step, prefix='per_batch',
+                    should_print=False)
+
+        # use the saved data to calculate the mean loss and accuracy
+        mean_loss = np.mean(total_loss)
+        mean_accuracy = np.mean(total_accuracy)
+        return mean_loss, mean_accuracy
+
+    def test(self, data, batch_size):
+        """
+        Tests the model using the proper testing set.
+
+        Args:
+            data: testing data yielded by the dataset's data provider
+            batch_size: `int`, number of examples in a testing batch
+        """
+        num_examples = data.num_examples
+        total_loss = []
+        total_accuracy = []
+
+        # save each testing batch's loss and accuracy
+        for i in range(num_examples // batch_size):
+            batch = data.next_batch(batch_size)
+            feed_dict = {
+                self.images: batch[0],
+                self.labels: batch[1],
+                self.is_training: False,
+            }
+            fetches = [self.cross_entropy, self.accuracy]
+            loss, accuracy = self.sess.run(fetches, feed_dict=feed_dict)
+            total_loss.append(loss)
+            total_accuracy.append(accuracy)
+
+        # use the saved data to calculate the mean loss and accuracy
+        mean_loss = np.mean(total_loss)
+        mean_accuracy = np.mean(total_accuracy)
+        return mean_loss, mean_accuracy
+
     def train_all_epochs(self, train_params):
+        """
+        Trains the model for a certain number of epochs, using parameters
+        specified in the train_params argument.
+
+        Args (in train_params):
+            batch_size: `int`, number of examples in a training batch
+            n_epochs: `int`, number of training epochs to run
+            initial_learning_rate: `int`, initial learning rate for optimizer
+            reduce_lr_epoch_1: `int`, first epoch where the current learning
+                rate is divided by 10 (initial_learning_rate/10)
+            reduce_lr_epoch_2: `int`, second epoch where the current learning
+                rate is divided by 10 (initial_learning_rate/100)
+            validation_set: `bool`, should a validation set be used or not
+            validation_split: `int` or None
+                `float`: chunk of the training set used as the validation set
+                None: use the testing set as the validation set
+            shuffle: `str` or None, or `bool`
+                `str` or None: used with CIFAR datasets, should we shuffle the
+                data only before training ('once_prior_train'), on every epoch
+                ('every_epoch') or not at all (None)
+                `bool`: used with SVHN, should we shuffle the data or not
+            normalization: `str` or None
+                None: don't use any normalization for pixels
+                'divide_255': divide all pixels by 255
+                'divide_256': divide all pixels by 256
+                'by_chanels': substract the mean of the pixel's chanel and
+                    divide the result by the channel's standard deviation
+        """
         n_epochs = train_params['n_epochs']
         learning_rate = train_params['initial_learning_rate']
         batch_size = train_params['batch_size']
         reduce_lr_epoch_1 = train_params['reduce_lr_epoch_1']
         reduce_lr_epoch_2 = train_params['reduce_lr_epoch_2']
         total_start_time = time.time()
+
         for epoch in range(1, n_epochs + 1):
             print("\n", '-' * 30, "Train epoch: %d" % epoch, '-' * 30, '\n')
             start_time = time.time()
@@ -396,6 +830,13 @@ class DenseNet:
                 if self.should_save_logs:
                     self.log_loss_accuracy(loss, acc, epoch, prefix='valid')
 
+            # Add new blocks or layers during certain epochs
+            if epoch != 1:
+                if (epoch-1) % 20 == 0:
+                    self._new_block()
+                elif (epoch-1) % 5 == 0:
+                    self._new_layer()
+
             time_per_epoch = time.time() - start_time
             seconds_left = int((n_epochs - epoch) * time_per_epoch)
             print("Time per epoch: %s, Est. complete in: %s" % (
@@ -408,49 +849,3 @@ class DenseNet:
         total_training_time = time.time() - total_start_time
         print("\nTotal training time: %s" % str(timedelta(
             seconds=total_training_time)))
-
-    def train_one_epoch(self, data, batch_size, learning_rate):
-        num_examples = data.num_examples
-        total_loss = []
-        total_accuracy = []
-        for i in range(num_examples // batch_size):
-            batch = data.next_batch(batch_size)
-            images, labels = batch
-            feed_dict = {
-                self.images: images,
-                self.labels: labels,
-                self.learning_rate: learning_rate,
-                self.is_training: True,
-            }
-            fetches = [self.train_step, self.cross_entropy, self.accuracy]
-            result = self.sess.run(fetches, feed_dict=feed_dict)
-            _, loss, accuracy = result
-            total_loss.append(loss)
-            total_accuracy.append(accuracy)
-            if self.should_save_logs:
-                self.batches_step += 1
-                self.log_loss_accuracy(
-                    loss, accuracy, self.batches_step, prefix='per_batch',
-                    should_print=False)
-        mean_loss = np.mean(total_loss)
-        mean_accuracy = np.mean(total_accuracy)
-        return mean_loss, mean_accuracy
-
-    def test(self, data, batch_size):
-        num_examples = data.num_examples
-        total_loss = []
-        total_accuracy = []
-        for i in range(num_examples // batch_size):
-            batch = data.next_batch(batch_size)
-            feed_dict = {
-                self.images: batch[0],
-                self.labels: batch[1],
-                self.is_training: False,
-            }
-            fetches = [self.cross_entropy, self.accuracy]
-            loss, accuracy = self.sess.run(fetches, feed_dict=feed_dict)
-            total_loss.append(loss)
-            total_accuracy.append(accuracy)
-        mean_loss = np.mean(total_loss)
-        mean_accuracy = np.mean(total_accuracy)
-        return mean_loss, mean_accuracy

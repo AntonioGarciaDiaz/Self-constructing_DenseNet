@@ -7,7 +7,7 @@ import numpy as np
 
 
 from .base_provider import ImagesDataSet, DataProvider
-from .downloader import download_data_url
+from .downloader import download_data_url, extract_data
 
 
 def augment_image(image, pad):
@@ -224,6 +224,11 @@ class Cifar10DataProvider(CifarDataProvider):
 
     def get_filenames(self, save_path):
         sub_save_path = os.path.join(save_path, 'cifar-10-batches-py')
+
+        # In case the file was downloaded but not extracted
+        if not os.path.exists(sub_save_path):
+            extract_data(save_path)
+
         train_filenames = [
             os.path.join(
                 sub_save_path,
@@ -238,6 +243,11 @@ class Cifar100DataProvider(CifarDataProvider):
 
     def get_filenames(self, save_path):
         sub_save_path = os.path.join(save_path, 'cifar-100-python')
+
+        # In case the file was downloaded but not extracted
+        if not os.path.exists(sub_save_path):
+            extract_data(save_path)
+
         train_filenames = [os.path.join(sub_save_path, 'train')]
         test_filenames = [os.path.join(sub_save_path, 'test')]
         return train_filenames, test_filenames
@@ -291,9 +301,11 @@ if __name__ == '__main__':
     c10_provider_not_shuffled = Cifar10DataProvider(shuffle=None)
     c10_provider_shuffled = Cifar10DataProvider(shuffle='once_prior_train')
     assert not np.all(
-        c10_provider_not_shuffled.train.images != c10_provider_shuffled.train.images)
+        c10_provider_not_shuffled.train.images !=
+        c10_provider_shuffled.train.images)
     assert np.all(
-        c10_provider_not_shuffled.test.images == c10_provider_shuffled.test.images)
+        c10_provider_not_shuffled.test.images ==
+        c10_provider_shuffled.test.images)
 
     n_plots = 10
     fig, axes = plt.subplots(nrows=4, ncols=n_plots)
