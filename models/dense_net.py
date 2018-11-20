@@ -507,10 +507,13 @@ class DenseNet:
         In DenseNet-BC mode, two layers (bottleneck and compression) will be
         added instead of just one.
         """
-        with tf.variable_scope("Block_%d" % (self.total_blocks-1)):
-            with tf.variable_scope("layer_%d" % self.layer_num_list[-1]):
-                self.output = self.add_internal_layer(
-                    self.output, self.growth_rate)
+        # safely access the current block's variable scope
+        with tf.variable_scope(self.current_block,
+                               auxiliary_name_scope=False) as cblock_scope:
+            with tf.name_scope(cblock_scope.original_name_scope):
+                with tf.variable_scope("layer_%d" % self.layer_num_list[-1]):
+                    self.output = self.add_internal_layer(
+                        self.output, self.growth_rate)
         self.layer_num_list[-1] += 1
 
         if not self.bc_mode:
@@ -536,7 +539,8 @@ class DenseNet:
         with tf.variable_scope("Transition_after_block_%d" %
                                (self.total_blocks-1)):
             self.output = self.transition_layer(self.output)
-        with tf.variable_scope("Block_%d" % self.total_blocks):
+        with tf.variable_scope("Block_%d" %
+                               self.total_blocks) as self.current_block:
             self.output = self.add_block(self.output, self.growth_rate, 1)
         self.layer_num_list.append(1)
         self.total_blocks += 1
@@ -616,7 +620,7 @@ class DenseNet:
 
         # then add the required blocks
         for block in range(self.total_blocks):
-            with tf.variable_scope("Block_%d" % block):
+            with tf.variable_scope("Block_%d" % block) as self.current_block:
                 self.output = self.add_block(self.output, growth_rate,
                                              layers_in_each_block[block])
             #  all blocks except the last have transition layers
@@ -830,7 +834,7 @@ class DenseNet:
                 if self.should_save_logs:
                     self.log_loss_accuracy(loss, acc, epoch, prefix='valid')
 
-            # Add new blocks or layers during certain epochs
+            # add new blocks or layers during certain epochs
             if epoch != 1:
                 if (epoch-1) % 20 == 0:
                     self._new_block()
