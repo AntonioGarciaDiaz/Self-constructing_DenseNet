@@ -3,7 +3,7 @@ Self-constructing DenseNet with TensorFlow
 
 Algorithm for automatically building `Densely Connected Convolutional Networks <https://arxiv.org/abs/1608.06993>`__ (DenseNets).
 
-A modification of `Illarion Khlyestov's TensorFlow implementation of DenseNets. <https://github.com/ikhlestov/vision_networks>`__
+A modification of `Illarion Khlestov's TensorFlow implementation of DenseNets. <https://github.com/ikhlestov/vision_networks>`__
 
 The current algorithm is rather naive: it adds 1 new layer every 5 epochs, and 1 new block every 20 epochs. A proper self-constructing algorithm will be implemented in the future.
 
