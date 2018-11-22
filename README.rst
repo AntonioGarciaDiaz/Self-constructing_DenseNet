@@ -2,13 +2,17 @@ Self-constructing DenseNet with TensorFlow
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Algorithm for automatically building `Densely Connected Convolutional Networks <https://arxiv.org/abs/1608.06993>`__ (DenseNets).
-A modification of `Illarion Khlyestov's TensorFlow implementation of DenseNets. <https://github.com/ikhlestov/vision_networks>`__
+
+A modification of `Illarion Khlestov's TensorFlow implementation of DenseNets. <https://github.com/ikhlestov/vision_networks>`__
 
 The current algorithm is rather naive: it adds 1 new layer every 5 epochs, and 1 new block every 20 epochs. A proper self-constructing algorithm will be implemented in the future.
 
-N.B.: For these self-constructing algorithms, I've chosen to implement a more "flexible" definition of DenseNets, where not all blocks necessarily have the same ammount of layers. This means that instead of the usual parameters for the number of layers (depth) and blocks, a parameter called `layer_num_list` is used for defining the initial blocks with their number of layers.
-Example: `--layer_num_list '6,6,6'` would mean that three blocks with 6 layers are created, and the algorithm starts building inside the third block.
-The default value for `layer_num_list` is `'1'`. That is, the algorithm begins with one block, containing a single layer, and can build new layers inside this block.
+N.B.: For these self-constructing algorithms, I've chosen to implement a more "flexible" definition of DenseNets, where not all blocks necessarily have the same ammount of layers.
+This means that instead of the usual parameters for the number of layers (depth) and blocks, a parameter called :code:`layer_num_list` is used for defining the initial blocks with their number of layers.
+
+Example: :code:`--layer_num_list '6,6,6'` would mean that three blocks with 6 layers are created, and the algorithm starts building inside the third block.
+
+The default value for this parameter is :code:`'1'`. That is, the algorithm begins with one block, containing a single layer, and can build new layers inside this block.
 
 Two types of DenseNets are available:
 
