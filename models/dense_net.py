@@ -40,6 +40,7 @@ class DenseNet:
             model_type: `str`, model type name ('DenseNet' or 'DenseNet-BC'),
                 should we use bottleneck layers and compression or not.
             dataset: `str`, dataset name
+            should_self_construct: `bool`, should use self-constructing or not
             should_save_logs: `bool`, should logs be saved or not
             should_save_model: `bool`, should the model be saved or not
             renew_logs: `bool`, remove previous logs for current model
@@ -83,6 +84,7 @@ class DenseNet:
         self.nesterov_momentum = nesterov_momentum
         self.model_type = model_type
         self.dataset_name = dataset
+        self.should_self_construct = should_self_construct
         self.should_save_logs = should_save_logs
         self.should_save_model = should_save_model
         self.renew_logs = renew_logs
@@ -180,11 +182,11 @@ class DenseNet:
         Writes a log of the current mean loss (cross_entropy) and accuracy.
 
         Args:
-            loss: tensor providing the loss (cross_entropy)
-            accuracy: tensor providing the accuracy
+            loss: `float`, loss (cross_entropy) for the current log
+            accuracy: `float`, accuracy for the current log
             epoch: `int`, current training epoch (or batch)
-            prefix: `str`, are these logs per batch ('per_batch'), per
-                training epoch ('train') or per validation epoch ('valid')
+            prefix: `str`, is this log for a batch ('per_batch'), a
+                training epoch ('train') or a validation epoch ('valid')
             should_print: `bool`, should we print this log on console or not
         """
         if should_print:
@@ -397,7 +399,7 @@ class DenseNet:
     # BLOCKS AND THEIR INTERNAL LAYERS ----------------------------------------
     # -------------------------------------------------------------------------
 
-    def add_internal_layer(self, _input, growth_rate):
+    def add_internal_layer(self, _input, layer, growth_rate):
         """
         Adds a new convolutional (dense) layer within a block.
         This layer will perform the composite function H_l([x_0, ..., x_l-1])
@@ -407,25 +409,28 @@ class DenseNet:
 
         Args:
             _input: tensor, the operation's input
+            layer: `int`, identifier number for this layer (within a block)
             growth_rate: `int`, number of new convolutions per dense layer
         """
-        # use the composite function H_l (3x3 kernel conv)
-        if not self.bc_mode:
-            comp_out = self.composite_function(
-                _input, out_features=growth_rate, kernel_size=3)
-        # in DenseNet-BC mode, add a bottleneck layer before H_l (1x1 conv)
-        elif self.bc_mode:
-            bottleneck_out = self.bottleneck(_input, out_features=growth_rate)
-            comp_out = self.composite_function(
-                bottleneck_out, out_features=growth_rate, kernel_size=3)
-        # concatenate output from H_l with layer input (all previous outputs)
-        if TF_VERSION[0] >= 1 and TF_VERSION[1] >= 0:
-            output = tf.concat(axis=3, values=(_input, comp_out))
-        else:
-            output = tf.concat(3, (_input, comp_out))
+        with tf.variable_scope("layer_%d" % layer):
+            # use the composite function H_l (3x3 kernel conv)
+            if not self.bc_mode:
+                comp_out = self.composite_function(
+                    _input, out_features=growth_rate, kernel_size=3)
+            # in DenseNet-BC mode, add a bottleneck layer before H_l (1x1 conv)
+            elif self.bc_mode:
+                bottleneck_out = self.bottleneck(
+                    _input, out_features=growth_rate)
+                comp_out = self.composite_function(
+                    bottleneck_out, out_features=growth_rate, kernel_size=3)
+            # concatenate output of H_l with layer input (all previous outputs)
+            if TF_VERSION[0] >= 1 and TF_VERSION[1] >= 0:
+                output = tf.concat(axis=3, values=(_input, comp_out))
+            else:
+                output = tf.concat(3, (_input, comp_out))
         return output
 
-    def add_block(self, _input, growth_rate, layers_in_block):
+    def add_block(self, _input, block, growth_rate, layers_in_block):
         """
         Adds a new block containing several convolutional (dense) layers.
         These are connected together following a DenseNet architecture,
@@ -433,19 +438,20 @@ class DenseNet:
 
         Args:
             _input: tensor, the operation's input
+            block: `int`, identifier number for this block
             growth_rate: `int`, number of new convolutions per dense layer
             layers_in_block: `int`, number of dense layers in this block
         """
-        output = _input
-        for layer in range(layers_in_block):
-            with tf.variable_scope("layer_%d" % layer):
-                output = self.add_internal_layer(output, growth_rate)
+        with tf.variable_scope("Block_%d" % block) as self.current_block:
+            output = _input
+            for layer in range(layers_in_block):
+                output = self.add_internal_layer(output, layer, growth_rate)
         return output
 
     # TRANSITION LAYERS -------------------------------------------------------
     # -------------------------------------------------------------------------
 
-    def transition_layer(self, _input):
+    def transition_layer(self, _input, block):
         """
         Adds a new transition layer after a block. This layer's inputs are the
         concatenated feature maps of each layer in the block.
@@ -458,17 +464,19 @@ class DenseNet:
 
         Args:
             _input: tensor, the operation's input
+            block: `int`, identifier number for the previous block
         """
-        # add feature map compression in DenseNet-BC mode
-        out_features = int(int(_input.get_shape()[-1]) * self.reduction)
-        # use the composite function H_l (1x1 kernel conv)
-        output = self.composite_function(
-            _input, out_features=out_features, kernel_size=1)
-        # use average pooling to reduce feature map size
-        output = self.avg_pool(output, k=2)
+        with tf.variable_scope("Transition_after_block_%d" % block):
+            # add feature map compression in DenseNet-BC mode
+            out_features = int(int(_input.get_shape()[-1]) * self.reduction)
+            # use the composite function H_l (1x1 kernel conv)
+            output = self.composite_function(
+                _input, out_features=out_features, kernel_size=1)
+            # use average pooling to reduce feature map size
+            output = self.avg_pool(output, k=2)
         return output
 
-    def transition_layer_to_classes(self, _input):
+    def transition_layer_to_classes(self, _input, block, layer):
         """
         Adds the transition layer after the last block. This layer outputs the
         estimated probabilities by classes. It performs:
@@ -480,22 +488,26 @@ class DenseNet:
 
         Args:
             _input: tensor, the operation's input
+            block: `int`, identifier number for the last block
+            layer: `int`, identifier number for the last layer in that block
         """
-        # batch normalization
-        output = self.batch_norm(_input)
-        # ReLU activation function
-        output = tf.nn.relu(output)
-        # wide average pooling
-        last_pool_kernel = int(output.get_shape()[-2])
-        output = self.avg_pool(output, k=last_pool_kernel)
-        # reshaping the output into 1D
-        features_total = int(output.get_shape()[-1])
-        output = tf.reshape(output, [-1, features_total])
-        # fully-connected layer
-        W = self.weight_variable_xavier(
-            [features_total, self.n_classes], name='W')
-        bias = self.bias_variable([self.n_classes])
-        logits = tf.matmul(output, W) + bias
+        with tf.variable_scope("Transition_to_classes_block_%d_layer_%d" %
+                               (block, layer)):
+            # batch normalization
+            output = self.batch_norm(_input)
+            # ReLU activation function
+            output = tf.nn.relu(output)
+            # wide average pooling
+            last_pool_kernel = int(output.get_shape()[-2])
+            output = self.avg_pool(output, k=last_pool_kernel)
+            # reshaping the output into 1D
+            features_total = int(output.get_shape()[-1])
+            output = tf.reshape(output, [-1, features_total])
+            # fully-connected layer
+            W = self.weight_variable_xavier(
+                [features_total, self.n_classes], name='W')
+            bias = self.bias_variable([self.n_classes])
+            logits = tf.matmul(output, W) + bias
         return logits
 
     # MAIN GRAPH BUILDING FUNCTION --------------------------------------------
@@ -511,17 +523,16 @@ class DenseNet:
         with tf.variable_scope(self.current_block,
                                auxiliary_name_scope=False) as cblock_scope:
             with tf.name_scope(cblock_scope.original_name_scope):
-                with tf.variable_scope("layer_%d" % self.layer_num_list[-1]):
-                    self.output = self.add_internal_layer(
-                        self.output, self.growth_rate)
+                self.output = self.add_internal_layer(
+                    self.output, self.layer_num_list[-1], self.growth_rate)
         self.layer_num_list[-1] += 1
 
         if not self.bc_mode:
-            print("Added a new layer to the last block (#%d)! "
+            print("ADDED A NEW LAYER to the last block (#%d)! "
                   "It now has got %d layers" %
                   (self.total_blocks-1, self.layer_num_list[-1]))
         if self.bc_mode:
-            print("Added a new pair of layers to the last block (#%d)! "
+            print("ADDED A NEW PAIR OF LAYERS to the last block (#%d)! "
                   "It now has got %d bottleneck and composite layers" %
                   (self.total_blocks-1, self.layer_num_list[-1]))
 
@@ -536,17 +547,15 @@ class DenseNet:
         In DenseNet-BC mode, the new module will begin with two layers
         (bottleneck and compression) instead of just one.
         """
-        with tf.variable_scope("Transition_after_block_%d" %
-                               (self.total_blocks-1)):
-            self.output = self.transition_layer(self.output)
-        with tf.variable_scope("Block_%d" %
-                               self.total_blocks) as self.current_block:
-            self.output = self.add_block(self.output, self.growth_rate, 1)
+        self.output = self.transition_layer(self.output, self.total_blocks-1)
+        self.output = self.add_block(
+            self.output, self.total_blocks, self.growth_rate, 1)
         self.layer_num_list.append(1)
         self.total_blocks += 1
 
-        print("Added a new block (#%d), "
-              "The number of layers is now:" % (self.total_blocks-1))
+        print("ADDED A NEW BLOCK (#%d), "
+              "The number of layers in each block is now:" %
+              (self.total_blocks-1))
         if not self.bc_mode:
             print('\n'.join('Block %d: %d composite layers.' % (
                 k, self.layer_num_list[k]) for k in range(len(
@@ -568,10 +577,8 @@ class DenseNet:
         and the accuracy.
         """
         # add the FC transition layer to the classes (+ softmax).
-        with tf.variable_scope("Transition_to_classes_block_%d_layer_%d" %
-                               (self.total_blocks-1,
-                                self.layer_num_list[-1]-1)):
-            logits = self.transition_layer_to_classes(self.output)
+        logits = self.transition_layer_to_classes(
+            self.output, self.total_blocks-1, self.layer_num_list[-1]-1)
         prediction = tf.nn.softmax(logits)
 
         # set the calculation for the losses (cross_entropy and l2_loss)
@@ -620,13 +627,11 @@ class DenseNet:
 
         # then add the required blocks
         for block in range(self.total_blocks):
-            with tf.variable_scope("Block_%d" % block) as self.current_block:
-                self.output = self.add_block(self.output, growth_rate,
-                                             layers_in_each_block[block])
+            self.output = self.add_block(
+                self.output, block, growth_rate, layers_in_each_block[block])
             #  all blocks except the last have transition layers
             if block != self.total_blocks - 1:
-                with tf.variable_scope("Transition_after_block_%d" % block):
-                    self.output = self.transition_layer(self.output)
+                self.output = self.transition_layer(self.output, block)
 
         self._define_end_graph_operations()
 
@@ -709,6 +714,25 @@ class DenseNet:
     # ---------------------TRAINING AND TESTING THE MODEL----------------------
     # -------------------------------------------------------------------------
 
+    def self_constructing_epoch(self, loss, accuracy, epoch):
+        """
+        The self-constructing step for one training epoch. Adds new layers
+        and/or blocks depending on parameters.
+        Returns True if training should continue, False otherwise.
+
+        Args:
+            loss: `float`, validation set loss (cross_entropy) for this epoch
+            accuracy: `float`, validation set accuracy for this epoch
+            epoch: `int`, current training epoch
+        """
+        continue_training = True
+        if epoch != 1:
+            if (epoch-1) % 20 == 0:
+                self._new_block()
+            elif (epoch-1) % 5 == 0:
+                self._new_layer()
+        return continue_training
+
     def train_one_epoch(self, data, batch_size, learning_rate):
         """
         Trains the model for one epoch using data from the proper training set.
@@ -785,7 +809,7 @@ class DenseNet:
 
         Args (in train_params):
             batch_size: `int`, number of examples in a training batch
-            n_epochs: `int`, number of training epochs to run
+            max_n_epochs: `int`, maximum number of training epochs to run
             initial_learning_rate: `int`, initial learning rate for optimizer
             reduce_lr_epoch_1: `int`, first epoch where the current learning
                 rate is divided by 10 (initial_learning_rate/10)
@@ -807,26 +831,29 @@ class DenseNet:
                 'by_chanels': substract the mean of the pixel's chanel and
                     divide the result by the channel's standard deviation
         """
-        n_epochs = train_params['n_epochs']
+        max_n_epochs = train_params['max_n_epochs']
         learning_rate = train_params['initial_learning_rate']
         batch_size = train_params['batch_size']
         reduce_lr_epoch_1 = train_params['reduce_lr_epoch_1']
         reduce_lr_epoch_2 = train_params['reduce_lr_epoch_2']
         total_start_time = time.time()
 
-        for epoch in range(1, n_epochs + 1):
+        epoch = 1
+        while epoch < max_n_epochs + 1:
             print("\n", '-' * 30, "Train epoch: %d" % epoch, '-' * 30, '\n')
             start_time = time.time()
             if epoch == reduce_lr_epoch_1 or epoch == reduce_lr_epoch_2:
                 learning_rate = learning_rate / 10
                 print("Decrease learning rate, new lr = %f" % learning_rate)
 
+            # training step for one epoch
             print("Training...")
             loss, acc = self.train_one_epoch(
                 self.data_provider.train, batch_size, learning_rate)
             if self.should_save_logs:
                 self.log_loss_accuracy(loss, acc, epoch, prefix='train')
 
+            # validation step after the epoch
             if train_params.get('validation_set', False):
                 print("Validation...")
                 loss, acc = self.test(
@@ -834,22 +861,23 @@ class DenseNet:
                 if self.should_save_logs:
                     self.log_loss_accuracy(loss, acc, epoch, prefix='valid')
 
-            # add new blocks or layers during certain epochs
-            if epoch != 1:
-                if (epoch-1) % 20 == 0:
-                    self._new_block()
-                elif (epoch-1) % 5 == 0:
-                    self._new_layer()
+            # self-constructing step
+            if self.should_self_construct:
+                if not self.self_constructing_epoch(loss, acc, epoch):
+                    break
 
+            # measure training time for this epoch
             time_per_epoch = time.time() - start_time
-            seconds_left = int((n_epochs - epoch) * time_per_epoch)
+            seconds_left = int((max_n_epochs - epoch) * time_per_epoch)
             print("Time per epoch: %s, Est. complete in: %s" % (
                 str(timedelta(seconds=time_per_epoch)),
                 str(timedelta(seconds=seconds_left))))
 
             if self.should_save_model:
                 self.save_model()
+            epoch += 1
 
+        # measure total training time
         total_training_time = time.time() - total_start_time
         print("\nTotal training time: %s" % str(timedelta(
             seconds=total_training_time)))

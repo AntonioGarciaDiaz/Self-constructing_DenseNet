@@ -8,7 +8,7 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 train_params_cifar = {
     'batch_size': 64,
-    'n_epochs': 40,  # default was 300
+    'max_n_epochs': 40,  # default was 300
     'initial_learning_rate': 0.1,
     'reduce_lr_epoch_1': 20,  # epochs * 0.5, default was 150
     'reduce_lr_epoch_2': 30,  # epochs * 0.75, default was 225
@@ -20,7 +20,7 @@ train_params_cifar = {
 
 train_params_svhn = {
     'batch_size': 64,
-    'n_epochs': 40,
+    'max_n_epochs': 40,
     'initial_learning_rate': 0.1,
     'reduce_lr_epoch_1': 20,
     'reduce_lr_epoch_2': 30,
@@ -80,6 +80,16 @@ if __name__ == '__main__':
     parser.add_argument(
         '--reduction', '-red', '-theta', type=float, default=0.5, metavar='',
         help='Reduction (theta) at transition layer, for DenseNets-BC models.')
+
+    parser.add_argument(
+        '--self-construct', dest='should_self_construct', action='store_true',
+        help='Apply a self-constructing algorithm for modifying'
+             'the network\'s architecture during training.')
+    parser.add_argument(
+        '--no-self-construct', dest='should_self_construct',
+        action='store_false',
+        help='Do not apply a self-constructing algorithm.')
+    parser.set_defaults(should_self_construct=True)
 
     parser.add_argument(
         '--logs', dest='should_save_logs', action='store_true',
