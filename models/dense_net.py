@@ -19,7 +19,7 @@ class DenseNet:
     def __init__(self, data_provider, growth_rate, layer_num_list,
                  keep_prob, num_inter_threads, num_intra_threads,
                  weight_decay, nesterov_momentum, model_type, dataset,
-                 should_save_logs, should_save_model,
+                 should_self_construct, should_save_logs, should_save_model,
                  renew_logs=False,
                  reduction=1.0,
                  bc_mode=False,
