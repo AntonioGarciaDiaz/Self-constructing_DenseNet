@@ -510,7 +510,7 @@ class DenseNet:
             logits = tf.matmul(output, W) + bias
         return logits
 
-    # MAIN GRAPH BUILDING FUNCTION --------------------------------------------
+    # MAIN GRAPH BUILDING FUNCTIONS -------------------------------------------
     # -------------------------------------------------------------------------
 
     def _new_layer(self):
@@ -570,6 +570,34 @@ class DenseNet:
         self._define_end_graph_operations()
         self._initialize_uninitialized_variables()
 
+    def _build_graph(self):
+        """
+        Gets the growth rate and the layers per block.
+        Then builds the graph and defines the operations for:
+        cross entropy (also l2_loss and a momentum optimizer),
+        training step (minimize momentum optimizer using l2_loss + cross entr),
+        accuracy (reduce mean).
+        """
+        growth_rate = self.growth_rate
+        layers_in_each_block = self.layer_num_list
+        self.output = self.images
+
+        # first add a 3x3 convolution layer with first_output_features outputs
+        with tf.variable_scope("Initial_convolution"):
+            self.output = self.conv2d(self.output,
+                                      out_features=self.first_output_features,
+                                      kernel_size=3)
+
+        # then add the required blocks
+        for block in range(self.total_blocks):
+            self.output = self.add_block(
+                self.output, block, growth_rate, layers_in_each_block[block])
+            #  all blocks except the last have transition layers
+            if block != self.total_blocks - 1:
+                self.output = self.transition_layer(self.output, block)
+
+        self._define_end_graph_operations()
+
     def _define_end_graph_operations(self):
         """
         Adds the last layer on top of the (editable portion of the) graph.
@@ -606,34 +634,6 @@ class DenseNet:
             tf.argmax(prediction, 1),
             tf.argmax(self.labels, 1))
         self.accuracy = tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
-
-    def _build_graph(self):
-        """
-        Gets the growth rate and the layers per block.
-        Then builds the graph and defines the operations for:
-        cross entropy (also l2_loss and a momentum optimizer),
-        training step (minimize momentum optimizer using l2_loss + cross entr),
-        accuracy (reduce mean).
-        """
-        growth_rate = self.growth_rate
-        layers_in_each_block = self.layer_num_list
-        self.output = self.images
-
-        # first add a 3x3 convolution layer with first_output_features outputs
-        with tf.variable_scope("Initial_convolution"):
-            self.output = self.conv2d(self.output,
-                                      out_features=self.first_output_features,
-                                      kernel_size=3)
-
-        # then add the required blocks
-        for block in range(self.total_blocks):
-            self.output = self.add_block(
-                self.output, block, growth_rate, layers_in_each_block[block])
-            #  all blocks except the last have transition layers
-            if block != self.total_blocks - 1:
-                self.output = self.transition_layer(self.output, block)
-
-        self._define_end_graph_operations()
 
     # -------------------------------------------------------------------------
     # -------------------INITIALIZING THE TENSORFLOW SESSION-------------------
