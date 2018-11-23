@@ -106,14 +106,16 @@ class DenseNet:
         This is also used after an AttributeError when calling these paths.
         """
         save_path = 'saves/%s' % self.model_identifier
-        os.makedirs(save_path, exist_ok=True)
+        if self.should_save_model:
+            os.makedirs(save_path, exist_ok=True)
         save_path = os.path.join(save_path, 'model.chkpt')
         self._save_path = save_path
 
         logs_path = 'logs/%s' % self.model_identifier
-        if self.renew_logs:
-            shutil.rmtree(logs_path, ignore_errors=True)
-        os.makedirs(logs_path, exist_ok=True)
+        if self.should_save_logs:
+            if self.renew_logs:
+                shutil.rmtree(logs_path, ignore_errors=True)
+            os.makedirs(logs_path, exist_ok=True)
         self._logs_path = logs_path
 
         return save_path, logs_path
@@ -430,7 +432,7 @@ class DenseNet:
                 output = tf.concat(3, (_input, comp_out))
         return output
 
-    def add_block(self, _input, block, growth_rate, layers_in_block):
+    def add_block(self, _input, block, growth_rate, layers_in_block, is_last):
         """
         Adds a new block containing several convolutional (dense) layers.
         These are connected together following a DenseNet architecture,
@@ -441,11 +443,22 @@ class DenseNet:
             block: `int`, identifier number for this block
             growth_rate: `int`, number of new convolutions per dense layer
             layers_in_block: `int`, number of dense layers in this block
+            is_last: `bool`, is this the last block in the network or not
         """
+        if is_last:
+            self.cross_entropy = []
+
         with tf.variable_scope("Block_%d" % block) as self.current_block:
             output = _input
             for layer in range(layers_in_block):
                 output = self.add_internal_layer(output, layer, growth_rate)
+
+                # Save the cross-entropy for all layers except the last one
+                # (it will be saved as part of the end-graph operations)
+                if is_last and layer != layers_in_block-1:
+                    _, cross_entropy = self.cross_entropy_loss(
+                        output, self.labels, block, layer)
+                    self.cross_entropy.append(cross_entropy)
         return output
 
     # TRANSITION LAYERS -------------------------------------------------------
@@ -510,6 +523,66 @@ class DenseNet:
             logits = tf.matmul(output, W) + bias
         return logits
 
+    # END GRAPH OPERATIONS ----------------------------------------------------
+    # -------------------------------------------------------------------------
+
+    def cross_entropy_loss(self, _input, labels, block, layer):
+        """
+        Takes an input and adds a transition layer to obtain predictions for
+        classes. Then calculates the cross-entropy loss for that input with
+        respect to expected labels. Returns the prediction tensor and the
+        calculated cross-entropy.
+
+        Args:
+            _input: tensor, the operation's input
+            labels: tensor, the expected labels (classes) for the data
+            block: `int`, identifier number for the last block
+            layer: `int`, identifier number for the last layer in that block
+        """
+        # add the FC transition layer to the classes (+ softmax).
+        logits = self.transition_layer_to_classes(
+            _input, self.total_blocks-1, self.layer_num_list[-1]-1)
+        prediction = tf.nn.softmax(logits)
+
+        # set the calculation for the losses (cross_entropy and l2_loss)
+        if TF_VERSION[0] >= 1 and TF_VERSION[1] >= 5:
+            cross_entropy = tf.reduce_mean(
+                tf.nn.softmax_cross_entropy_with_logits_v2(logits=logits,
+                                                           labels=labels))
+        else:
+            cross_entropy = tf.reduce_mean(
+                tf.nn.softmax_cross_entropy_with_logits(logits=logits,
+                                                        labels=labels))
+
+        return prediction, cross_entropy
+
+    def _define_end_graph_operations(self):
+        """
+        Adds the last layer on top of the (editable portion of the) graph.
+        Then defines the operations for cross-entropy, the training step,
+        and the accuracy.
+        """
+        # obtain the predicted logits, set the calculation for the losses
+        # (cross_entropy and l2_loss)
+        prediction, cross_entropy = self.cross_entropy_loss(
+            self.output, self.labels, self.total_blocks-1,
+            self.layer_num_list[-1]-1)
+        self.cross_entropy.append(cross_entropy)
+        l2_loss = tf.add_n(
+            [tf.nn.l2_loss(var) for var in tf.trainable_variables()])
+
+        # set the optimizer and define the training step
+        optimizer = tf.train.MomentumOptimizer(
+            self.learning_rate, self.nesterov_momentum, use_nesterov=True)
+        self.train_step = optimizer.minimize(
+            cross_entropy + l2_loss * self.weight_decay)
+
+        # set the calculation for the accuracy
+        correct_prediction = tf.equal(
+            tf.argmax(prediction, 1),
+            tf.argmax(self.labels, 1))
+        self.accuracy = tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
+
     # MAIN GRAPH BUILDING FUNCTIONS -------------------------------------------
     # -------------------------------------------------------------------------
 
@@ -549,7 +622,7 @@ class DenseNet:
         """
         self.output = self.transition_layer(self.output, self.total_blocks-1)
         self.output = self.add_block(
-            self.output, self.total_blocks, self.growth_rate, 1)
+            self.output, self.total_blocks, self.growth_rate, 1, True)
         self.layer_num_list.append(1)
         self.total_blocks += 1
 
@@ -574,8 +647,8 @@ class DenseNet:
         """
         Gets the growth rate and the layers per block.
         Then builds the graph and defines the operations for:
-        cross entropy (also l2_loss and a momentum optimizer),
-        training step (minimize momentum optimizer using l2_loss + cross entr),
+        cross-entropy (also l2_loss and a momentum optimizer),
+        training step (minimize momentum optimizer using l2_loss + cross-entr),
         accuracy (reduce mean).
         """
         growth_rate = self.growth_rate
@@ -591,49 +664,13 @@ class DenseNet:
         # then add the required blocks
         for block in range(self.total_blocks):
             self.output = self.add_block(
-                self.output, block, growth_rate, layers_in_each_block[block])
+                self.output, block, growth_rate, layers_in_each_block[block],
+                block == self.total_blocks - 1)
             #  all blocks except the last have transition layers
             if block != self.total_blocks - 1:
                 self.output = self.transition_layer(self.output, block)
 
         self._define_end_graph_operations()
-
-    def _define_end_graph_operations(self):
-        """
-        Adds the last layer on top of the (editable portion of the) graph.
-        Then (re)defines the operations for cross entropy, the training step,
-        and the accuracy.
-        """
-        # add the FC transition layer to the classes (+ softmax).
-        logits = self.transition_layer_to_classes(
-            self.output, self.total_blocks-1, self.layer_num_list[-1]-1)
-        prediction = tf.nn.softmax(logits)
-
-        # set the calculation for the losses (cross_entropy and l2_loss)
-        if TF_VERSION[0] >= 1 and TF_VERSION[1] >= 5:
-            cross_entropy = tf.reduce_mean(
-                tf.nn.softmax_cross_entropy_with_logits_v2(logits=logits,
-                                                           labels=self.labels))
-        else:
-            cross_entropy = tf.reduce_mean(
-                tf.nn.softmax_cross_entropy_with_logits(logits=logits,
-                                                        labels=self.labels))
-
-        self.cross_entropy = cross_entropy
-        l2_loss = tf.add_n(
-            [tf.nn.l2_loss(var) for var in tf.trainable_variables()])
-
-        # set the optimizer and define the training step
-        optimizer = tf.train.MomentumOptimizer(
-            self.learning_rate, self.nesterov_momentum, use_nesterov=True)
-        self.train_step = optimizer.minimize(
-            cross_entropy + l2_loss * self.weight_decay)
-
-        # set the calculation for the accuracy
-        correct_prediction = tf.equal(
-            tf.argmax(prediction, 1),
-            tf.argmax(self.labels, 1))
-        self.accuracy = tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
 
     # -------------------------------------------------------------------------
     # -------------------INITIALIZING THE TENSORFLOW SESSION-------------------
@@ -684,12 +721,13 @@ class DenseNet:
 
         # initialize variables, create saver, create log file writer
         self._initialize_all_variables()
-        if TF_VERSION[0] >= 0 and TF_VERSION[1] >= 10:
-            logswriter = tf.summary.FileWriter
-        else:
-            logswriter = tf.train.SummaryWriter
         self.saver = tf.train.Saver()
-        self.summary_writer = logswriter(self.logs_path)
+        if self.should_save_logs:
+            if TF_VERSION[0] >= 0 and TF_VERSION[1] >= 10:
+                logswriter = tf.summary.FileWriter
+            else:
+                logswriter = tf.train.SummaryWriter
+            self.summary_writer = logswriter(self.logs_path)
 
     # -------------------------------------------------------------------------
     # --------------------COUNTING ALL TRAINABLE PARAMETERS--------------------
@@ -721,10 +759,18 @@ class DenseNet:
         Returns True if training should continue, False otherwise.
 
         Args:
-            loss: `float`, validation set loss (cross_entropy) for this epoch
+            loss: `list` of `float`, validation set loss (cross_entropy) for
+                this epoch, corresponding to each internal layer of the graph
             accuracy: `float`, validation set accuracy for this epoch
             epoch: `int`, current training epoch
         """
+        print('-' * 40)
+        print("Cross-entropy per layer in block #%d:" % (self.total_blocks-1))
+        for l in range(len(loss)):
+            print("- Layer #%d: cross-entropy = %f" % (l, loss[l]))
+        print("Current validation accuracy = %f" % accuracy)
+        print('-' * 40)
+
         continue_training = True
         if epoch != 1:
             if (epoch-1) % 20 == 0:
@@ -756,7 +802,7 @@ class DenseNet:
                 self.learning_rate: learning_rate,
                 self.is_training: True,
             }
-            fetches = [self.train_step, self.cross_entropy, self.accuracy]
+            fetches = [self.train_step, self.cross_entropy[-1], self.accuracy]
             result = self.sess.run(fetches, feed_dict=feed_dict)
             _, loss, accuracy = result
             total_loss.append(loss)
@@ -782,6 +828,8 @@ class DenseNet:
         """
         num_examples = data.num_examples
         total_loss = []
+        for l in range(len(self.cross_entropy)):
+            total_loss.append([])
         total_accuracy = []
 
         # save each testing batch's loss and accuracy
@@ -792,13 +840,16 @@ class DenseNet:
                 self.labels: batch[1],
                 self.is_training: False,
             }
-            fetches = [self.cross_entropy, self.accuracy]
-            loss, accuracy = self.sess.run(fetches, feed_dict=feed_dict)
-            total_loss.append(loss)
+            loss = self.sess.run(self.cross_entropy, feed_dict=feed_dict)
+            accuracy = self.sess.run(self.accuracy, feed_dict=feed_dict)
+            for j in range(len(loss)):
+                total_loss[j].append(loss[j])
             total_accuracy.append(accuracy)
 
         # use the saved data to calculate the mean loss and accuracy
-        mean_loss = np.mean(total_loss)
+        mean_loss = []
+        for loss_list in total_loss:
+            mean_loss.append(np.mean(loss_list))
         mean_accuracy = np.mean(total_accuracy)
         return mean_loss, mean_accuracy
 
@@ -811,10 +862,12 @@ class DenseNet:
             batch_size: `int`, number of examples in a training batch
             max_n_epochs: `int`, maximum number of training epochs to run
             initial_learning_rate: `int`, initial learning rate for optimizer
-            reduce_lr_epoch_1: `int`, first epoch where the current learning
-                rate is divided by 10 (initial_learning_rate/10)
-            reduce_lr_epoch_2: `int`, second epoch where the current learning
-                rate is divided by 10 (initial_learning_rate/100)
+            reduce_lr_epoch_1: `int`, if not self-constructing the network,
+                first epoch where the current learning rate is divided by 10
+                (initial_learning_rate/10)
+            reduce_lr_epoch_2: `int`, if not self-constructing the network,
+                second epoch where the current learning rate is divided by 10
+                (initial_learning_rate/100)
             validation_set: `bool`, should a validation set be used or not
             validation_split: `int` or None
                 `float`: chunk of the training set used as the validation set
@@ -842,9 +895,12 @@ class DenseNet:
         while epoch < max_n_epochs + 1:
             print("\n", '-' * 30, "Train epoch: %d" % epoch, '-' * 30, '\n')
             start_time = time.time()
-            if epoch == reduce_lr_epoch_1 or epoch == reduce_lr_epoch_2:
-                learning_rate = learning_rate / 10
-                print("Decrease learning rate, new lr = %f" % learning_rate)
+            # learning rate only decreases when not self-constructing
+            if not self.should_self_construct:
+                if epoch == reduce_lr_epoch_1 or epoch == reduce_lr_epoch_2:
+                    learning_rate = learning_rate / 10
+                    print("Decrease learning rate, new lr = %f" %
+                          learning_rate)
 
             # training step for one epoch
             print("Training...")
@@ -859,7 +915,8 @@ class DenseNet:
                 loss, acc = self.test(
                     self.data_provider.validation, batch_size)
                 if self.should_save_logs:
-                    self.log_loss_accuracy(loss, acc, epoch, prefix='valid')
+                    self.log_loss_accuracy(loss[-1], acc, epoch,
+                                           prefix='valid')
 
             # self-constructing step
             if self.should_self_construct:
