@@ -4,6 +4,7 @@ import shutil
 from datetime import timedelta
 
 import numpy as np
+import scipy.misc
 import tensorflow as tf
 
 
@@ -20,6 +21,7 @@ class DenseNet:
                  keep_prob, num_inter_threads, num_intra_threads,
                  weight_decay, nesterov_momentum, model_type, dataset,
                  should_self_construct, should_save_logs, should_save_model,
+                 should_save_images,
                  renew_logs=False,
                  reduction=1.0,
                  bc_mode=False,
@@ -43,6 +45,7 @@ class DenseNet:
             should_self_construct: `bool`, should use self-constructing or not
             should_save_logs: `bool`, should logs be saved or not
             should_save_model: `bool`, should the model be saved or not
+            should_save_images: `bool`, should images be saved or not
             renew_logs: `bool`, remove previous logs for current model
             reduction: `float`, reduction (theta) at transition layers for
                 DenseNets with compression (DenseNet-BC)
@@ -87,6 +90,7 @@ class DenseNet:
         self.should_self_construct = should_self_construct
         self.should_save_logs = should_save_logs
         self.should_save_model = should_save_model
+        self.should_save_images = should_save_images
         self.renew_logs = renew_logs
         self.batches_step = 0
 
@@ -96,12 +100,12 @@ class DenseNet:
         self._count_trainable_params()
 
     # -------------------------------------------------------------------------
-    # -----------------------SAVING AND LOADING A MODEL------------------------
+    # ------------------------SAVING AND LOADING DATA -------------------------
     # -------------------------------------------------------------------------
 
     def update_paths(self):
         """
-        Update _save_path and _logs_path to use their proper values.
+        Update _save_path, _logs_path and _images_path to their proper values.
         This is used after the graph is modified (new block or layer).
         This is also used after an AttributeError when calling these paths.
         """
@@ -118,7 +122,12 @@ class DenseNet:
             os.makedirs(logs_path, exist_ok=True)
         self._logs_path = logs_path
 
-        return save_path, logs_path
+        images_path = 'images'
+        if self.should_save_images:
+            os.makedirs(images_path, exist_ok=True)
+        self._images_path = images_path
+
+        return save_path, logs_path, images_path
 
     @property
     def model_identifier(self):
@@ -153,6 +162,17 @@ class DenseNet:
         except AttributeError:
             logs_path = self.update_paths()[1]
         return logs_path
+
+    @property
+    def images_path(self):
+        """
+        Returns a path where the logs for the current model should be written.
+        """
+        try:
+            images_path = self._images_path
+        except AttributeError:
+            images_path = self.update_paths()[2]
+        return images_path
 
     def save_model(self, global_step=None):
         """
@@ -201,6 +221,36 @@ class DenseNet:
                 tag='accuracy_%s' % prefix, simple_value=float(accuracy))
         ])
         self.summary_writer.add_summary(summary, epoch)
+
+    def save_kernel_as_image(self, kernel, block_num, kernel_num, epoch):
+        """
+        Save a given kernel (a convolution filter) as a PNG image file.
+
+        Args:
+            kernel: tensor, the kernel to save
+            block_num: `int`, identifier number for the kernel's block
+            kernel_num: `int`, identifier for the kernel within the block
+            epoch: `int`, current training epoch (or batch)
+        """
+        # get an array representation of the kernel, then get its dimensions
+        k_image = self.sess.run(kernel)
+        k_dim = kernel.get_shape().as_list()
+
+        # properly format the kernel to save it as an image
+        k_image = k_image.transpose()
+        k_image = np.moveaxis(k_image, [1, 2], [2, 1])
+        k_image = np.resize(k_image, (k_dim[0]*k_dim[3], k_dim[1]*k_dim[2]))
+
+        print('* Block %d kernel %d: mean = %f, std = %f' % (
+            block_num, kernel_num, np.mean(k_image), np.std(k_image)
+        ))
+
+        # save the image in the proper file
+        im_filepath = './%s/block_%d_kernel_%d' % (
+            self.images_path, block_num, kernel_num)
+        os.makedirs(im_filepath, exist_ok=True)
+        im_filepath += '/epoch_%d.png' % epoch
+        scipy.misc.imsave(im_filepath, k_image)
 
     # -------------------------------------------------------------------------
     # -----------------------DEFINING INPUT PLACEHOLDERS-----------------------
@@ -280,6 +330,7 @@ class DenseNet:
         """
         Creates a 2D convolutional layer (applies a certain number of
         kernels on some input features to obtain output features).
+        Returns the output of the layer and a reference to its kernel.
 
         Args:
             _input: tensor, the operation's input
@@ -293,7 +344,7 @@ class DenseNet:
             [kernel_size, kernel_size, in_features, out_features],
             name='kernel')
         output = tf.nn.conv2d(_input, kernel, strides, padding)
-        return output
+        return output, kernel
 
     def dropout(self, _input):
         """
@@ -352,6 +403,7 @@ class DenseNet:
         - ReLU activation function
         - 2d convolution, with required kernel size (side)
         - dropout, if required (training the graph and keep_prob not set to 1)
+        Returns the output tensor and a reference to the 2d convolution kernel.
 
         Args:
             _input: tensor, the operation's input
@@ -364,11 +416,11 @@ class DenseNet:
             # ReLU activation function
             output = tf.nn.relu(output)
             # 2d convolution
-            output = self.conv2d(
+            output, kernel_ref = self.conv2d(
                 output, out_features=out_features, kernel_size=kernel_size)
             # dropout (if the graph is being trained and keep_prob is not 1)
             output = self.dropout(output)
-        return output
+        return output, kernel_ref
 
     def bottleneck(self, _input, out_features):
         """
@@ -378,6 +430,7 @@ class DenseNet:
         - ReLU activation function
         - 2d convolution, with kernel size 1 (produces 4x the features of H_l)
         - dropout, if required (training the graph and keep_prob not set to 1)
+        Returns the output tensor and a reference to the 2d convolution kernel.
 
         Args:
             _input: tensor, the operation's input
@@ -391,12 +444,12 @@ class DenseNet:
             output = tf.nn.relu(output)
             inter_features = out_features * 4
             # 2d convolution (produces intermediate features)
-            output = self.conv2d(
+            output, kernel_ref = self.conv2d(
                 output, out_features=inter_features, kernel_size=1,
                 padding='VALID')
             # dropout (if the graph is being trained and keep_prob is not 1)
             output = self.dropout(output)
-        return output
+        return output, kernel_ref
 
     # BLOCKS AND THEIR INTERNAL LAYERS ----------------------------------------
     # -------------------------------------------------------------------------
@@ -417,14 +470,19 @@ class DenseNet:
         with tf.variable_scope("layer_%d" % layer):
             # use the composite function H_l (3x3 kernel conv)
             if not self.bc_mode:
-                comp_out = self.composite_function(
+                comp_out, kernel_ref = self.composite_function(
                     _input, out_features=growth_rate, kernel_size=3)
             # in DenseNet-BC mode, add a bottleneck layer before H_l (1x1 conv)
             elif self.bc_mode:
-                bottleneck_out = self.bottleneck(
+                bottleneck_out, kernel_ref = self.bottleneck(
                     _input, out_features=growth_rate)
-                comp_out = self.composite_function(
+                if self.should_save_images:
+                    self.kernel_ref_list[-1].append(kernel_ref)
+                comp_out, kernel_ref = self.composite_function(
                     bottleneck_out, out_features=growth_rate, kernel_size=3)
+            # save a reference to the composite function's kernel
+            if self.should_save_images:
+                self.kernel_ref_list[-1].append(kernel_ref)
             # concatenate output of H_l with layer input (all previous outputs)
             if TF_VERSION[0] >= 1 and TF_VERSION[1] >= 0:
                 output = tf.concat(axis=3, values=(_input, comp_out))
@@ -445,6 +503,8 @@ class DenseNet:
             layers_in_block: `int`, number of dense layers in this block
             is_last: `bool`, is this the last block in the network or not
         """
+        if self.should_save_images:
+            self.kernel_ref_list.append([])
         if is_last:
             self.cross_entropy = []
 
@@ -483,7 +543,7 @@ class DenseNet:
             # add feature map compression in DenseNet-BC mode
             out_features = int(int(_input.get_shape()[-1]) * self.reduction)
             # use the composite function H_l (1x1 kernel conv)
-            output = self.composite_function(
+            output, _ = self.composite_function(
                 _input, out_features=out_features, kernel_size=1)
             # use average pooling to reduce feature map size
             output = self.avg_pool(output, k=2)
@@ -657,9 +717,11 @@ class DenseNet:
 
         # first add a 3x3 convolution layer with first_output_features outputs
         with tf.variable_scope("Initial_convolution"):
-            self.output = self.conv2d(self.output,
-                                      out_features=self.first_output_features,
-                                      kernel_size=3)
+            self.output, kernel_ref = self.conv2d(
+                self.output, out_features=self.first_output_features,
+                kernel_size=3)
+            if self.should_save_images:
+                self.kernel_ref_list = [[kernel_ref]]
 
         # then add the required blocks
         for block in range(self.total_blocks):
@@ -764,19 +826,32 @@ class DenseNet:
             accuracy: `float`, validation set accuracy for this epoch
             epoch: `int`, current training epoch
         """
+        # print the current accuracy and the cross-entropy for each layer
         print('-' * 40)
+        print("Current validation accuracy = %f" % accuracy)
         print("Cross-entropy per layer in block #%d:" % (self.total_blocks-1))
         for l in range(len(loss)):
-            print("- Layer #%d: cross-entropy = %f" % (l, loss[l]))
-        print("Current validation accuracy = %f" % accuracy)
+            print("* Layer #%d: cross-entropy = %f" % (l, loss[l]))
         print('-' * 40)
 
+        if self.should_save_images:
+            # save each kernel as an image, printing the mean and std values
+            print("Saving kernels as images...")
+            for b in range(-1, self.total_blocks):
+                for k in range(len(self.kernel_ref_list[b+1])):
+                    self.save_kernel_as_image(
+                        self.kernel_ref_list[b+1][k], b, k, epoch)
+            print('-' * 40)
+
+        # naive W.I.P. self-constructing algorithm
+        # useful to test the effects of adding layers/blocks at certain moments
         continue_training = True
-        if epoch != 1:
-            if (epoch-1) % 20 == 0:
-                self._new_block()
-            elif (epoch-1) % 5 == 0:
-                self._new_layer()
+        # if epoch != 1 and epoch <= 40:
+        #     # if (epoch-1) % 20 == 0:
+        #     #     self._new_block()
+        #     if (epoch-1) % 10 == 0:
+        #         self._new_layer()
+
         return continue_training
 
     def train_one_epoch(self, data, batch_size, learning_rate):

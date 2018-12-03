@@ -108,6 +108,14 @@ if __name__ == '__main__':
     parser.set_defaults(should_save_model=True)
 
     parser.add_argument(
+        '--images', dest='should_save_images', action='store_true',
+        help='Write images (such as kernel states).')
+    parser.add_argument(
+        '--no-images', dest='should_save_images', action='store_false',
+        help='Do not write images.')
+    parser.set_defaults(should_save_images=False)
+
+    parser.add_argument(
         '--renew-logs', dest='renew_logs', action='store_true',
         help='Erase previous logs for model if they exist.')
     parser.add_argument(
