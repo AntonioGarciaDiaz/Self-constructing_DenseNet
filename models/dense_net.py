@@ -239,7 +239,7 @@ class DenseNet:
         # properly format the kernel to save it as an image
         k_image = k_image.transpose()
         k_image = np.moveaxis(k_image, [1, 2], [2, 1])
-        k_image = np.resize(k_image, (k_dim[0]*k_dim[3], k_dim[1]*k_dim[2]))
+        k_image = np.resize(k_image, (k_dim[1]*k_dim[3], k_dim[0]*k_dim[2]))
 
         print('* Block %d kernel %d: mean = %f, std = %f' % (
             block_num, kernel_num, np.mean(k_image), np.std(k_image)
@@ -846,11 +846,11 @@ class DenseNet:
         # naive W.I.P. self-constructing algorithm
         # useful to test the effects of adding layers/blocks at certain moments
         continue_training = True
-        # if epoch != 1 and epoch <= 40:
-        #     # if (epoch-1) % 20 == 0:
-        #     #     self._new_block()
-        #     if (epoch-1) % 10 == 0:
-        #         self._new_layer()
+        if epoch != 1 and epoch <= 40:
+            # if (epoch-1) % 20 == 0:
+            #     self._new_block()
+            if (epoch-1) % 10 == 0:
+                self._new_layer()
 
         return continue_training
 

@@ -8,7 +8,7 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 train_params_cifar = {
     'batch_size': 64,
-    'max_n_epochs': 40,  # default was 300
+    'max_n_epochs': 80,  # default was 300
     'initial_learning_rate': 0.1,
     'reduce_lr_epoch_1': 20,  # epochs * 0.5, default was 150
     'reduce_lr_epoch_2': 30,  # epochs * 0.75, default was 225
