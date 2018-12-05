@@ -543,8 +543,11 @@ class DenseNet:
             # add feature map compression in DenseNet-BC mode
             out_features = int(int(_input.get_shape()[-1]) * self.reduction)
             # use the composite function H_l (1x1 kernel conv)
-            output, _ = self.composite_function(
+            output, kernel_ref = self.composite_function(
                 _input, out_features=out_features, kernel_size=1)
+            # save a reference to the composite function's kernel
+            if self.should_save_images:
+                self.kernel_ref_list[-1].append(kernel_ref)
             # use average pooling to reduce feature map size
             output = self.avg_pool(output, k=2)
         return output
