@@ -5,7 +5,7 @@ Algorithm for automatically building `Densely Connected Convolutional Networks <
 
 A modification of `Illarion Khlestov's TensorFlow implementation of DenseNets. <https://github.com/ikhlestov/vision_networks>`__
 
-The current algorithm is rather naive: it adds 1 new layer every 10 epochs and 1 new block every 20 epochs, until it reaches epoch 40. This kind of algorithm will always produce the same structure if stopped at a fixed epoch, which is very useful for measuring the inpact of adding elements to the topology at specific stages of the training stage. A proper self-constructing algorithm will be implemented in the future.
+The algorithm that is currently implemented is rather naive: it adds 1 new layer every 10 epochs and 1 new block every 20 epochs, until it reaches epoch 40. Naive algorithms like this one will always produce the same structure if stopped at a fixed epoch, which is very useful for measuring the inpact of adding elements to the topology at specific stages of the training stage. Experiments are currently being undertaken to implement a proper self-constructing algorithm in the future.
 
 N.B.: For these self-constructing algorithms, I've chosen to implement a more "flexible" definition of DenseNets, where not all blocks necessarily have the same ammount of layers.
 This means that instead of the usual parameters for the number of layers (depth) and blocks, a parameter called :code:`layer_num_list` is used for defining the initial blocks with their number of layers.
