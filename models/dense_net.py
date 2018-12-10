@@ -603,8 +603,7 @@ class DenseNet:
             layer: `int`, identifier number for the last layer in that block
         """
         # add the FC transition layer to the classes (+ softmax).
-        logits = self.transition_layer_to_classes(
-            _input, self.total_blocks-1, self.layer_num_list[-1]-1)
+        logits = self.transition_layer_to_classes(_input, block, layer)
         prediction = tf.nn.softmax(logits)
 
         # set the calculation for the losses (cross_entropy and l2_loss)

@@ -10,7 +10,7 @@ The current algorithm is rather naive: it adds 1 new layer every 10 epochs and 1
 N.B.: For these self-constructing algorithms, I've chosen to implement a more "flexible" definition of DenseNets, where not all blocks necessarily have the same ammount of layers.
 This means that instead of the usual parameters for the number of layers (depth) and blocks, a parameter called :code:`layer_num_list` is used for defining the initial blocks with their number of layers.
 
-Example: :code:`--layer_num_list '6,6,6'` would mean that three blocks with 6 layers are created, and the algorithm starts building inside the third block.
+Example: :code:`--layer_num_list '12,12,12'` would mean that three blocks with 12 layers are created (the default architecture in Illarion Khlestov's implementation), and the algorithm starts building inside the third block.
 
 The default value for this parameter is :code:`'1'`. That is, the algorithm begins with one block, containing a single layer, and can build new layers inside this block.
 
