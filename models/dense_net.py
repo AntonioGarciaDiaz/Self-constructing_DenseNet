@@ -1,7 +1,7 @@
 import os
 import time
 import shutil
-from datetime import timedelta
+from datetime import timedelta, datetime
 
 import numpy as np
 import scipy.misc
@@ -20,8 +20,9 @@ class DenseNet:
     def __init__(self, data_provider, growth_rate, layer_num_list,
                  keep_prob, num_inter_threads, num_intra_threads,
                  weight_decay, nesterov_momentum, model_type, dataset,
-                 should_self_construct, should_save_logs, should_save_model,
-                 should_save_images,
+                 should_self_construct, should_save_logs,
+                 feature_period, should_save_ft_logs, check_kernel_features,
+                 should_save_model, should_save_images,
                  renew_logs=False,
                  reduction=1.0,
                  bc_mode=False,
@@ -34,7 +35,7 @@ class DenseNet:
             data_provider: data provider object for the required data set
             growth_rate: `int`, number of new convolutions per dense layer
             layer_num_list: `str`, list of number of layers in each block,
-                separated by commas (example: '12,12,12')
+                separated by commas (e.g. '12,12,12')
             keep_prob: `float`, keep probability for dropout. If keep_prob = 1
                 dropout will be disabled
             weight_decay: `float`, weight decay for L2 loss, paper = 1e-4
@@ -43,7 +44,11 @@ class DenseNet:
                 should we use bottleneck layers and compression or not.
             dataset: `str`, dataset name
             should_self_construct: `bool`, should use self-constructing or not
-            should_save_logs: `bool`, should logs be saved or not
+            should_save_logs: `bool`, should tensorflow logs be saved or not
+            feature_period: `int`, number of epochs between two measurements
+                of relevant features (e.g. accuracy, loss, kernel mean and std)
+            should_save_ft_logs: `bool`, should feature logs be saved or not
+            check_kernel_features: `bool`, should check kernel features or not
             should_save_model: `bool`, should the model be saved or not
             should_save_images: `bool`, should images be saved or not
             renew_logs: `bool`, remove previous logs for current model
@@ -52,6 +57,7 @@ class DenseNet:
             bc_mode: `bool`, boolean equivalent of model_type, should we use
                 bottleneck layers and compression (DenseNet-BC) or not.
         """
+        self.creation_time = datetime.now().strftime("%Y_%m_%d_%H%M%S")
         self.data_provider = data_provider
         self.data_shape = data_provider.data_shape
         self.n_classes = data_provider.n_classes
@@ -89,6 +95,11 @@ class DenseNet:
         self.dataset_name = dataset
         self.should_self_construct = should_self_construct
         self.should_save_logs = should_save_logs
+
+        self.feature_period = feature_period
+        self.should_save_ft_logs = should_save_ft_logs
+        self.check_kernel_features = check_kernel_features
+
         self.should_save_model = should_save_model
         self.should_save_images = should_save_images
         self.renew_logs = renew_logs
@@ -105,7 +116,7 @@ class DenseNet:
 
     def update_paths(self):
         """
-        Update _save_path, _logs_path and _images_path to their proper values.
+        Update all paths for saving data to their proper values.
         This is used after the graph is modified (new block or layer).
         This is also used after an AttributeError when calling these paths.
         """
@@ -122,12 +133,17 @@ class DenseNet:
             os.makedirs(logs_path, exist_ok=True)
         self._logs_path = logs_path
 
-        images_path = 'images'
+        ft_logs_path = 'ft_logs/%s' % self.run_identifier
+        if self.should_save_ft_logs:
+            os.makedirs('ft_logs/', exist_ok=True)
+        self._ft_logs_path = ft_logs_path
+
+        images_path = 'images/%s' % self.run_identifier
         if self.should_save_images:
             os.makedirs(images_path, exist_ok=True)
         self._images_path = images_path
 
-        return save_path, logs_path, images_path
+        return save_path, logs_path, ft_logs_path, images_path
 
     @property
     def model_identifier(self):
@@ -140,6 +156,18 @@ class DenseNet:
         return "{}_growth_rate={}_layer_num_list={}_dataset_{}".format(
             self.model_type, self.growth_rate, ",".join(map(
                 str, self.layer_num_list)), self.dataset_name)
+
+    @property
+    def run_identifier(self):
+        """
+        Returns an identifier `str` for the current execution of the algorithm.
+        It gives the model's type ('DenseNet' or 'DenseNet-BC'),
+        its growth rate k, the dataset that was used,
+        and the date and hour at which the execution started.
+        """
+        return "{}_{}_growth_rate={}_dataset_{}".format(
+            self.model_type, self.creation_time, self.growth_rate,
+            self.dataset_name)
 
     @property
     def save_path(self):
@@ -164,14 +192,26 @@ class DenseNet:
         return logs_path
 
     @property
+    def ft_logs_path(self):
+        """
+        Returns a path where the evolution of features in the current execution
+        should be recorded.
+        """
+        try:
+            ft_logs_path = self._ft_logs_path
+        except AttributeError:
+            ft_logs_path = self.update_paths()[2]
+        return ft_logs_path
+
+    @property
     def images_path(self):
         """
-        Returns a path where the logs for the current model should be written.
+        Returns a path where images from the current execution should be saved.
         """
         try:
             images_path = self._images_path
         except AttributeError:
-            images_path = self.update_paths()[2]
+            images_path = self.update_paths()[3]
         return images_path
 
     def save_model(self, global_step=None):
@@ -222,9 +262,11 @@ class DenseNet:
         ])
         self.summary_writer.add_summary(summary, epoch)
 
-    def save_kernel_as_image(self, kernel, block_num, kernel_num, epoch):
+    def process_kernels(self, kernel, block_num, kernel_num, epoch):
         """
-        Save a given kernel (a convolution filter) as a PNG image file.
+        Process the kernels of a given convolution filter, in some cases record
+        their mean and standard deviation values in the feature logs, and/or
+        save a representation of the kernels PNG image file.
 
         Args:
             kernel: tensor, the kernel to save
@@ -232,25 +274,30 @@ class DenseNet:
             kernel_num: `int`, identifier for the kernel within the block
             epoch: `int`, current training epoch (or batch)
         """
-        # get an array representation of the kernel, then get its dimensions
+        # get an array representation of the kernels, then get its dimensions
         k_image = self.sess.run(kernel)
-        k_dim = kernel.get_shape().as_list()
-
-        # properly format the kernel to save it as an image
-        k_image = k_image.transpose()
-        k_image = np.moveaxis(k_image, [1, 2], [2, 1])
-        k_image = np.resize(k_image, (k_dim[1]*k_dim[3], k_dim[0]*k_dim[2]))
-
+        k_d = kernel.get_shape().as_list()
         print('* Block %d kernel %d: mean = %f, std = %f' % (
             block_num, kernel_num, np.mean(k_image), np.std(k_image)
         ))
 
-        # save the image in the proper file
-        im_filepath = './%s/block_%d_kernel_%d' % (
-            self.images_path, block_num, kernel_num)
-        os.makedirs(im_filepath, exist_ok=True)
-        im_filepath += '/epoch_%d.png' % epoch
-        scipy.misc.imsave(im_filepath, k_image)
+        if self.should_save_ft_logs:
+            # save feature logs for the kernel mean and standard deviation
+            self.feature_writer.write((';\"%f\";\"%f\"' % (
+                np.mean(k_image), np.std(k_image))).replace(".", ","))
+
+        if self.should_save_images:
+            # properly format the kernels to save them as an image
+            k_image = k_image.transpose()
+            k_image = np.moveaxis(k_image, [1, 2], [2, 1])
+            k_image = np.resize(k_image, (k_d[1]*k_d[3], k_d[0]*k_d[2]))
+
+            # save the image in the proper file
+            im_filepath = './%s/block_%d_kernel_%d' % (
+                self.images_path, block_num, kernel_num)
+            os.makedirs(im_filepath, exist_ok=True)
+            im_filepath += '/epoch_%d.png' % epoch
+            scipy.misc.imsave(im_filepath, k_image)
 
     # -------------------------------------------------------------------------
     # -----------------------DEFINING INPUT PLACEHOLDERS-----------------------
@@ -476,12 +523,12 @@ class DenseNet:
             elif self.bc_mode:
                 bottleneck_out, kernel_ref = self.bottleneck(
                     _input, out_features=growth_rate)
-                if self.should_save_images:
+                if self.check_kernel_features:
                     self.kernel_ref_list[-1].append(kernel_ref)
                 comp_out, kernel_ref = self.composite_function(
                     bottleneck_out, out_features=growth_rate, kernel_size=3)
             # save a reference to the composite function's kernel
-            if self.should_save_images:
+            if self.check_kernel_features:
                 self.kernel_ref_list[-1].append(kernel_ref)
             # concatenate output of H_l with layer input (all previous outputs)
             if TF_VERSION[0] >= 1 and TF_VERSION[1] >= 0:
@@ -503,7 +550,7 @@ class DenseNet:
             layers_in_block: `int`, number of dense layers in this block
             is_last: `bool`, is this the last block in the network or not
         """
-        if self.should_save_images:
+        if self.check_kernel_features:
             self.kernel_ref_list.append([])
         if is_last:
             self.cross_entropy = []
@@ -546,7 +593,7 @@ class DenseNet:
             output, kernel_ref = self.composite_function(
                 _input, out_features=out_features, kernel_size=1)
             # save a reference to the composite function's kernel
-            if self.should_save_images:
+            if self.check_kernel_features:
                 self.kernel_ref_list[-1].append(kernel_ref)
             # use average pooling to reduce feature map size
             output = self.avg_pool(output, k=2)
@@ -722,7 +769,7 @@ class DenseNet:
             self.output, kernel_ref = self.conv2d(
                 self.output, out_features=self.first_output_features,
                 kernel_size=3)
-            if self.should_save_images:
+            if self.check_kernel_features:
                 self.kernel_ref_list = [[kernel_ref]]
 
         # then add the required blocks
@@ -783,7 +830,7 @@ class DenseNet:
         config.gpu_options.allow_growth = True
         self.sess = tf.Session(config=config)
 
-        # initialize variables, create saver, create log file writer
+        # initialize variables, create saver, create log file writers
         self._initialize_all_variables()
         self.saver = tf.train.Saver()
         if self.should_save_logs:
@@ -792,6 +839,8 @@ class DenseNet:
             else:
                 logswriter = tf.train.SummaryWriter
             self.summary_writer = logswriter(self.logs_path)
+        if self.should_save_ft_logs:
+            self.feature_writer = open('./%s.csv' % self.ft_logs_path, "w")
 
     # -------------------------------------------------------------------------
     # --------------------COUNTING ALL TRAINABLE PARAMETERS--------------------
@@ -810,17 +859,17 @@ class DenseNet:
             for dim in shape:
                 variable_parametes *= dim.value
             total_parameters += variable_parametes
-        print("Total trainable params: %.1fM" % (total_parameters / 1e6))
+        print("Total trainable params: %.1fk" % (total_parameters / 1e3))
 
     # -------------------------------------------------------------------------
     # ---------------------TRAINING AND TESTING THE MODEL----------------------
     # -------------------------------------------------------------------------
 
-    def self_constructing_epoch(self, loss, accuracy, epoch):
+    def print_relevant_features(self, loss, accuracy, epoch):
         """
-        The self-constructing step for one training epoch. Adds new layers
-        and/or blocks depending on parameters.
-        Returns True if training should continue, False otherwise.
+        Prints on console the current values of relevant features.
+        If feature logs are being saved, this function also saves these values.
+        If images are being saved, kernel states are also saved as images.
 
         Args:
             loss: `list` of `float`, validation set loss (cross_entropy) for
@@ -829,22 +878,42 @@ class DenseNet:
             epoch: `int`, current training epoch
         """
         # print the current accuracy and the cross-entropy for each layer
-        print('-' * 40)
         print("Current validation accuracy = %f" % accuracy)
-        print("Cross-entropy per layer in block #%d:" % (self.total_blocks-1))
+        print("Cross-entropy per layer in block #%d:" % (
+            self.total_blocks-1))
         for l in range(len(loss)):
             print("* Layer #%d: cross-entropy = %f" % (l, loss[l]))
-        print('-' * 40)
 
-        if self.should_save_images:
-            # save each kernel as an image, printing the mean and std values
-            print("Saving kernels as images...")
+        if self.should_save_ft_logs:
+            # save the previously printed feature values
+            self.feature_writer.write(("\"Epoch %d\";\"%f\";" % (
+                epoch, accuracy)).replace(".", ","))
+            for l in range(len(loss)):
+                self.feature_writer.write(("\"%f\";" % loss[l]
+                                           ).replace(".", ","))
+            self.feature_writer.write('\"\"')
+
+        if self.check_kernel_features:
+            # process kernels, sometimes save images and/or their mean and std
+            print('-' * 40 + "\nProcessing kernels:")
             for b in range(-1, self.total_blocks):
                 for k in range(len(self.kernel_ref_list[b+1])):
-                    self.save_kernel_as_image(
+                    self.process_kernels(
                         self.kernel_ref_list[b+1][k], b, k, epoch)
-            print('-' * 40)
 
+        print('-' * 40)
+        if self.should_save_ft_logs:
+            self.feature_writer.write('\n')
+
+    def self_constructing_epoch(self, epoch):
+        """
+        The self-constructing step for one training epoch. Adds new layers
+        and/or blocks depending on parameters.
+        Returns True if training should continue, False otherwise.
+
+        Args:
+            epoch: `int`, current training epoch
+        """
         # naive W.I.P. self-constructing algorithm
         # useful to test the effects of adding layers/blocks at certain moments
         continue_training = True
@@ -970,8 +1039,11 @@ class DenseNet:
 
         epoch = 1
         while epoch < max_n_epochs + 1:
-            print("\n", '-' * 30, "Train epoch: %d" % epoch, '-' * 30, '\n')
+            # only print epoch name on certain epochs
+            if (epoch-1) % self.feature_period == 0:
+                print('\n', '-'*30, "Train epoch: %d" % epoch, '-'*30, '\n')
             start_time = time.time()
+
             # learning rate only decreases when not self-constructing
             if not self.should_self_construct:
                 if epoch == reduce_lr_epoch_1 or epoch == reduce_lr_epoch_2:
@@ -980,7 +1052,7 @@ class DenseNet:
                           learning_rate)
 
             # training step for one epoch
-            print("Training...")
+            print("Training...", end=' ')
             loss, acc = self.train_one_epoch(
                 self.data_provider.train, batch_size, learning_rate)
             if self.should_save_logs:
@@ -995,9 +1067,13 @@ class DenseNet:
                     self.log_loss_accuracy(loss[-1], acc, epoch,
                                            prefix='valid')
 
+            # on certain epochs print (and perhaps save) feature values
+            if (epoch-1) % self.feature_period == 0:
+                self.print_relevant_features(loss, acc, epoch)
+
             # self-constructing step
             if self.should_self_construct:
-                if not self.self_constructing_epoch(loss, acc, epoch):
+                if not self.self_constructing_epoch(epoch):
                     break
 
             # measure training time for this epoch

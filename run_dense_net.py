@@ -63,10 +63,10 @@ if __name__ == '__main__':
         default='C10',
         help='Choice of dataset to use.')
     parser.add_argument(
-        '--layer_num_list', '-lnlst',
+        '--layer_num_list', '-lnl',
         type=str, default='1', metavar='',
         help='List of the number of layers in each block, separated by comas'
-             ' (example: \'12,12,12\', default: 1 block with 1 layer)'
+             ' (e.g. \'12,12,12\', default: 1 block with 1 layer)'
              'WARNING: in BC models, each layer is preceded by a bottleneck.')
     parser.add_argument(
         '--keep_prob', '-kp', type=float, metavar='',
@@ -100,6 +100,26 @@ if __name__ == '__main__':
     parser.set_defaults(should_save_logs=True)
 
     parser.add_argument(
+        '--feature_period', '-fp', type=int, default=5,
+        help='Number of epochs between each measurement of feature values.')
+    parser.add_argument(
+        '--feature-logs', dest='should_save_ft_logs', action='store_true',
+        help='Record the evolution of feature values in a CSV log.')
+    parser.add_argument(
+        '--no-feature-logs', dest='should_save_ft_logs', action='store_false',
+        help='Do not record feature values in a CSV log.')
+    parser.set_defaults(should_save_ft_logs=True)
+    parser.add_argument(
+        '--kernel-features', dest='check_kernel_features', action='store_true',
+        help='Measure feature values from convolution kernels'
+             '(e.g. the mean and std of a filter\'s kernel values).')
+    parser.add_argument(
+        '--no-kernel-features', dest='check_kernel_features',
+        action='store_false',
+        help='Do not measure feature values from kernels.')
+    parser.set_defaults(check_kernel_features=True)
+
+    parser.add_argument(
         '--saves', dest='should_save_model', action='store_true',
         help='Save model during training.')
     parser.add_argument(
@@ -109,10 +129,10 @@ if __name__ == '__main__':
 
     parser.add_argument(
         '--images', dest='should_save_images', action='store_true',
-        help='Write images (such as kernel states).')
+        help='Produce and save image files (e.g. representing kernel states).')
     parser.add_argument(
         '--no-images', dest='should_save_images', action='store_false',
-        help='Do not write images.')
+        help='Do not produce and save image files.')
     parser.set_defaults(should_save_images=False)
 
     parser.add_argument(
