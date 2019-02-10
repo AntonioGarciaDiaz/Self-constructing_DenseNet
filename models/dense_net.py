@@ -21,7 +21,8 @@ class DenseNet:
                  keep_prob, num_inter_threads, num_intra_threads,
                  weight_decay, nesterov_momentum, model_type, dataset,
                  should_self_construct, should_save_logs,
-                 feature_period, should_save_ft_logs, check_kernel_features,
+                 feature_period, should_save_ft_logs,
+                 check_kernel_features, measure_layer_cr_entr,
                  should_save_model, should_save_images,
                  renew_logs=False,
                  reduction=1.0,
@@ -32,28 +33,30 @@ class DenseNet:
         https://arxiv.org/pdf/1611.05552.pdf
 
         Args:
-            data_provider: data provider object for the required data set
-            growth_rate: `int`, number of new convolutions per dense layer
+            data_provider: data provider object for the required data set;
+            growth_rate: `int`, number of new convolutions per dense layer;
             layer_num_list: `str`, list of number of layers in each block,
-                separated by commas (e.g. '12,12,12')
+                separated by commas (e.g. '12,12,12');
             keep_prob: `float`, keep probability for dropout. If keep_prob = 1
-                dropout will be disabled
-            weight_decay: `float`, weight decay for L2 loss, paper = 1e-4
-            nesterov_momentum: `float`, momentum for Nesterov optimizer
+                dropout will be disabled;
+            weight_decay: `float`, weight decay for L2 loss, paper = 1e-4;
+            nesterov_momentum: `float`, momentum for Nesterov optimizer;
             model_type: `str`, model type name ('DenseNet' or 'DenseNet-BC'),
-                should we use bottleneck layers and compression or not.
-            dataset: `str`, dataset name
-            should_self_construct: `bool`, should use self-constructing or not
-            should_save_logs: `bool`, should tensorflow logs be saved or not
+                should we use bottleneck layers and compression or not;
+            dataset: `str`, dataset name;
+            should_self_construct: `bool`, should use self-constructing or not;
+            should_save_logs: `bool`, should tensorflow logs be saved or not;
             feature_period: `int`, number of epochs between two measurements
-                of relevant features (e.g. accuracy, loss, kernel mean and std)
-            should_save_ft_logs: `bool`, should feature logs be saved or not
-            check_kernel_features: `bool`, should check kernel features or not
-            should_save_model: `bool`, should the model be saved or not
-            should_save_images: `bool`, should images be saved or not
-            renew_logs: `bool`, remove previous logs for current model
+                of feature values (e.g. accuracy, loss, kernel mean and std);
+            should_save_ft_logs: `bool`, should feature logs be saved or not;
+            measure_layer_cr_entr: `bool`, should measure cross-entropies for
+                each individual layer in the last block or not;
+            check_kernel_features: `bool`, should check kernel features or not;
+            should_save_model: `bool`, should the model be saved or not;
+            should_save_images: `bool`, should images be saved or not;
+            renew_logs: `bool`, remove previous logs for current model;
             reduction: `float`, reduction (theta) at transition layers for
-                DenseNets with compression (DenseNet-BC)
+                DenseNets with compression (DenseNet-BC);
             bc_mode: `bool`, boolean equivalent of model_type, should we use
                 bottleneck layers and compression (DenseNet-BC) or not.
         """
@@ -99,6 +102,7 @@ class DenseNet:
         self.feature_period = feature_period
         self.should_save_ft_logs = should_save_ft_logs
         self.check_kernel_features = check_kernel_features
+        self.measure_layer_cr_entr = measure_layer_cr_entr
 
         self.should_save_model = should_save_model
         self.should_save_images = should_save_images
@@ -560,12 +564,13 @@ class DenseNet:
             for layer in range(layers_in_block):
                 output = self.add_internal_layer(output, layer, growth_rate)
 
-                # Save the cross-entropy for all layers except the last one
-                # (it will be saved as part of the end-graph operations)
-                if is_last and layer != layers_in_block-1:
-                    _, cross_entropy = self.cross_entropy_loss(
-                        output, self.labels, block, layer)
-                    self.cross_entropy.append(cross_entropy)
+                if is_last and self.measure_layer_cr_entr:
+                    # Save the cross-entropy for all layers except the last one
+                    # (it is always saved as part of the end-graph operations)
+                    if layer != layers_in_block-1:
+                        _, cross_entropy = self.cross_entropy_loss(
+                            output, self.labels, block, layer)
+                        self.cross_entropy.append(cross_entropy)
         return output
 
     # TRANSITION LAYERS -------------------------------------------------------
@@ -708,6 +713,10 @@ class DenseNet:
                 self.output = self.add_internal_layer(
                     self.output, self.layer_num_list[-1], self.growth_rate)
         self.layer_num_list[-1] += 1
+
+        # Refresh the cross-entropy list if not measuring layer cross-entropies
+        if not self.measure_layer_cr_entr:
+            self.cross_entropy = []
 
         if not self.bc_mode:
             print("ADDED A NEW LAYER to the last block (#%d)! "
