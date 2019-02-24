@@ -14,7 +14,7 @@ TF_VERSION = list(map(int, tf.__version__.split('.')[:2]))
 class DenseNet:
 
     # -------------------------------------------------------------------------
-    # ----------------------------CLASS INITIALIZER----------------------------
+    # --------------------------- CLASS INITIALIZER ---------------------------
     # -------------------------------------------------------------------------
 
     def __init__(self, data_provider, growth_rate, layer_num_list,
@@ -22,7 +22,7 @@ class DenseNet:
                  weight_decay, nesterov_momentum, model_type, dataset,
                  should_self_construct, should_save_logs,
                  feature_period, should_save_ft_logs,
-                 check_kernel_features, measure_layer_cr_entr,
+                 ft_filters, ft_cross_entropies,
                  should_save_model, should_save_images,
                  renew_logs=False,
                  reduction=1.0,
@@ -47,11 +47,11 @@ class DenseNet:
             should_self_construct: `bool`, should use self-constructing or not;
             should_save_logs: `bool`, should tensorflow logs be saved or not;
             feature_period: `int`, number of epochs between two measurements
-                of feature values (e.g. accuracy, loss, kernel mean and std);
+                of feature values (e.g. accuracy, loss, weight mean and std);
             should_save_ft_logs: `bool`, should feature logs be saved or not;
-            measure_layer_cr_entr: `bool`, should measure cross-entropies for
+            ft_filters: `bool`, should check filter features or not;
+            ft_cross_entropies: `bool`, should measure cross-entropies for
                 each individual layer in the last block or not;
-            check_kernel_features: `bool`, should check kernel features or not;
             should_save_model: `bool`, should the model be saved or not;
             should_save_images: `bool`, should images be saved or not;
             renew_logs: `bool`, remove previous logs for current model;
@@ -101,8 +101,8 @@ class DenseNet:
 
         self.feature_period = feature_period
         self.should_save_ft_logs = should_save_ft_logs
-        self.check_kernel_features = check_kernel_features
-        self.measure_layer_cr_entr = measure_layer_cr_entr
+        self.ft_filters = ft_filters
+        self.ft_cross_entropies = ft_cross_entropies
 
         self.should_save_model = should_save_model
         self.should_save_images = should_save_images
@@ -115,7 +115,7 @@ class DenseNet:
         self._count_trainable_params()
 
     # -------------------------------------------------------------------------
-    # ------------------------SAVING AND LOADING DATA -------------------------
+    # ------------------------ SAVING AND LOADING DATA ------------------------
     # -------------------------------------------------------------------------
 
     def update_paths(self):
@@ -248,12 +248,12 @@ class DenseNet:
         Writes a log of the current mean loss (cross_entropy) and accuracy.
 
         Args:
-            loss: `float`, loss (cross_entropy) for the current log
-            accuracy: `float`, accuracy for the current log
-            epoch: `int`, current training epoch (or batch)
+            loss: `float`, loss (cross_entropy) for the current log;
+            accuracy: `float`, accuracy for the current log;
+            epoch: `int`, current training epoch (or batch);
             prefix: `str`, is this log for a batch ('per_batch'), a
-                training epoch ('train') or a validation epoch ('valid')
-            should_print: `bool`, should we print this log on console or not
+                training epoch ('train') or a validation epoch ('valid');
+            should_print: `bool`, should we print this log on console or not.
         """
         if should_print:
             print("mean cross_entropy: %f, mean accuracy: %f" % (
@@ -266,45 +266,221 @@ class DenseNet:
         ])
         self.summary_writer.add_summary(summary, epoch)
 
-    def process_kernels(self, kernel, block_num, kernel_num, epoch):
+    def ft_log_filters(self, b, cs_table_ls, num_layers,
+                       src_connect, dst_connect):
         """
-        Process the kernels of a given convolution filter, in some cases record
-        their mean and standard deviation values in the feature logs, and/or
-        save a representation of the kernels PNG image file.
+        Write a feature log with data concerning filters: the CS of every
+        connection in a given block, the source and destination connectivities
+        for all layers in the same block.
 
         Args:
-            kernel: tensor, the kernel to save
-            block_num: `int`, identifier number for the kernel's block
-            kernel_num: `int`, identifier for the kernel within the block
-            epoch: `int`, current training epoch (or batch)
+            b: `int`, identifier number for the block;
+            cs_table_ls: `list` of `list` of `float`, the table of CS for each
+                connection to a layer l from a source layer s;
+            num_layers: the number of layers in the block (this includes the
+                transition layer if it exists);
+            src_connect: source connectivity for all layers in the block;
+            dst_connect: destination connectivity for all layers in the block.
         """
-        # get an array representation of the kernels, then get its dimensions
-        k_image = self.sess.run(kernel)
-        k_d = kernel.get_shape().as_list()
-        print('* Block %d kernel %d: mean = %f, std = %f' % (
-            block_num, kernel_num, np.mean(k_image), np.std(k_image)
-        ))
+        # printing and saving the data to feature logs
+        for l in range(num_layers):
+            # source connectivity of l-1
+            print('  - Source connectivity = %f' % (src_connect[l]))
+            self.feature_writer.write((';\"%f\"' % (src_connect[l])
+                                       ).replace(".", ","))
+            self.feature_writer.write(';\"\"')
 
-        if self.should_save_ft_logs:
-            # save feature logs for the kernel mean and standard deviation
-            self.feature_writer.write((';\"%f\";\"%f\"' % (
-                np.mean(k_image), np.std(k_image))).replace(".", ","))
+            # destination layer normalised CS (sent from l-1 towards d)
+            for d in range(l, num_layers):
+                print('  - Towards layer %d: normalised CS = %f' % (
+                    d, cs_table_ls[d][l]/max(
+                        fwd[l] for fwd in cs_table_ls if len(fwd) > l)))
+                self.feature_writer.write((
+                    ';\"%f\"' % (cs_table_ls[d][l]/max(
+                        fwd[l] for fwd in cs_table_ls if len(fwd) > l))
+                    ).replace(".", ","))
+            self.feature_writer.write(';\"\"')
 
-        if self.should_save_images:
-            # properly format the kernels to save them as an image
-            k_image = k_image.transpose()
-            k_image = np.moveaxis(k_image, [1, 2], [2, 1])
-            k_image = np.resize(k_image, (k_d[1]*k_d[3], k_d[0]*k_d[2]))
+            print('\n* Block %d filter %d:' % (b, l))
 
-            # save the image in the proper file
-            im_filepath = './%s/block_%d_kernel_%d' % (
-                self.images_path, block_num, kernel_num)
-            os.makedirs(im_filepath, exist_ok=True)
-            im_filepath += '/epoch_%d.png' % epoch
-            scipy.misc.imsave(im_filepath, k_image)
+            # source layer normalised CS (recieved at l from s)
+            for s in range(len(cs_table_ls[l])):
+                print('  - From layer %d: normalised CS = %f' % (
+                    s, cs_table_ls[l][s]/max(cs_table_ls[l])))
+                self.feature_writer.write((
+                    ';\"%f\"' % (cs_table_ls[l][s]/max(cs_table_ls[l]))
+                    ).replace(".", ","))
+            self.feature_writer.write(';\"\"')
+
+            # destination connectivity of l
+            print('  - Destination connectivity = %f' % (dst_connect[l]))
+            self.feature_writer.write((';\"%f\"' % (dst_connect[l])
+                                       ).replace(".", ","))
 
     # -------------------------------------------------------------------------
-    # -----------------------DEFINING INPUT PLACEHOLDERS-----------------------
+    # ----------------------- PROCESSING FEATURE VALUES -----------------------
+    # -------------------------------------------------------------------------
+
+    def get_cs_list(self, f_image, f_num):
+        """
+        Get the list of connection strengths (CS) for all connections to a
+        given filter layer.
+        The CS of a connection is equal to the mean of its associated absolute
+        kernel weights (sum divided by num of weights).
+
+        Args:
+            f_image: `np.ndarray`, an array representation of the filter;
+            f_num: `int`, identifier for the filter within the block.
+        """
+        # split kernels by groups, depending on which connection they belong to
+        # for this, use filter numbering (different in BC mode!)
+        splitting_guide = []
+        for i in range(int(f_num/(1+int(self.bc_mode))), 0, -1):
+            splitting_guide.append(f_image.shape[0] - i*self.growth_rate)
+
+        if len(splitting_guide) > 0:
+            f_split_image = np.split(f_image, splitting_guide)
+        else:
+            f_split_image = [f_image]
+
+        # calculate CS (means of abs weights) by groups of kernels
+        cs_list = []
+        for split in range(len(f_split_image)):
+            cs_list.append(np.mean(np.abs(f_split_image[split])))
+
+        return cs_list
+
+    def get_src_connect(self, cs_table_ls, num_layers, tresh_fraction=0.67):
+        """
+        Get the source connectivity for all layers (filters) in a block.
+        The source connectivity of a layer l expresses how many of the
+        connections recieved by l are 'useful enough' at the level of l.
+        For each connection from a previous layer s to l, add +1/n_connections
+        if the connection's CS is >= tresh_fraction * the max CS for l.
+
+        Args:
+            cs_table_ls: `list` of `list` of `float`, the table of CS for each
+                connection to a layer l from a source layer s;
+            num_layers: the number of layers in the block (this includes the
+                transition layer if it exists);
+            tresh_fraction: `float`, the fraction of a layer's max CS that a CS
+                is compared to to be considered 'useful enough'.
+        """
+        src_connect = []
+        max_cs = 0  # the max CS for each future layer
+
+        for s in range(num_layers):
+            src_connect.append(0)
+            for l in range(num_layers):
+                if len(cs_table_ls[l]) > s:
+                    max_cs = max(cs_table_ls[l])
+                    src_connect[s] += int(cs_table_ls[l][s]/max_cs >= 0.67)
+            # normalised in order to make it a fraction
+            src_connect[s] /= num_layers - s
+
+        return src_connect
+
+    def get_dst_connect(self, cs_table_ls, num_layers, tresh_fraction=0.67):
+        """
+        Get the destination connectivity for all layers (filters) in a block.
+        The source connectivity of a layer l expresses how many of the
+        connections sent from its predecessor l-1 are 'useful enough' at the
+        levels of its destination layers within the block.
+        For each connection from l-1 to a further layer d, add +1/n_connections
+        if the connection's CS is >= tresh_fraction * the max CS for d.
+        N.B.: For l=0, the preceding l-1 is the output from the last block.
+
+        Args:
+            cs_table_ls: `list` of `list` of `float`, the table of CS for each
+                connection to a layer l from a source layer s;
+            num_layers: the number of layers in the block (this includes the
+                transition layer if it exists);
+            tresh_fraction: `float`, the fraction of a layer's max CS that a CS
+                is compared to to be considered 'useful enough'.
+        """
+        dst_connect = []
+        max_cs = 0  # the max CS for each future layer
+
+        for d in range(num_layers):
+            dst_connect.append(0)
+            for l in range(len(cs_table_ls[d])):
+                max_cs = max(fwd[l] for fwd in cs_table_ls if len(fwd) > l)
+                dst_connect[d] += int(cs_table_ls[d][l]/max_cs >= 0.67)
+            # normalised in order to make it a fraction
+            dst_connect[d] /= d+1
+
+        return dst_connect
+
+    def process_filter(self, filter, block_num, filter_num, epoch):
+        """
+        Process a given convolution filter's kernel weights, in some cases
+        save a representation of the filter and its weights as a PNG image.
+        Returns a list with the connection strengths (CS) for connections with
+        each previous layer's output.
+
+        Args:
+            filter: tensor, the filter whose kernel weights are processed;
+            block_num: `int`, identifier number for the filter's block;
+            filter_num: `int`, identifier for the filter within the block;
+            epoch: `int`, current training epoch (or batch).
+        """
+        # get an array representation of the filter, then get its dimensions
+        f_image = self.sess.run(filter)
+        f_d = filter.get_shape().as_list()
+        f_image = f_image.transpose()
+        f_image = np.moveaxis(f_image, [0, 1], [1, 0])
+
+        # calculate connection strength for all connections
+        cs_list = self.get_cs_list(f_image, filter_num)
+
+        if self.should_save_images:
+            # properly place the kernels to save the filter as an image
+            f_image = np.moveaxis(f_image, [1, 2], [0, 1])
+            f_image = np.resize(f_image, (f_d[1]*f_d[3], f_d[0]*f_d[2]))
+
+            # save the image in the proper file
+            im_filepath = './%s/block_%d_filter_%d' % (
+                self.images_path, block_num, filter_num)
+            os.makedirs(im_filepath, exist_ok=True)
+            im_filepath += '/epoch_%d.png' % epoch
+            scipy.misc.imsave(im_filepath, f_image)
+
+        return cs_list
+
+    def process_block_filters(self, b, epoch):
+        """
+        Process a given block's filters. In some cases record data related
+        to the filters' kernel weights (e.g. connection strengths) in the
+        feature logs, and/or save representations of the filters as PNG images.
+
+        Args:
+            b: `int`, identifier number for the block;
+            epoch: `int`, current training epoch (or batch).
+        """
+        cs_table_ls = []
+        # process each filter separately (except BC bottlenecks),
+        # get the conection strength for each connection with a previous layer
+        for f in range(len(self.filter_ref_list[b+1])):
+            if not self.bc_mode or not f % 2:
+                cs_table_ls.append(self.process_filter(
+                    self.filter_ref_list[b+1][f], b, f, epoch))
+        num_layers = len(cs_table_ls)  # this includes any transition layer
+
+        # source connectivity: among all the connections recieved by
+        # a layer l, how many of them are useful at the level of l?
+        src_connect = self.get_src_connect(cs_table_ls, num_layers)
+
+        # destination connectivity: among all the connections sent from
+        # a layer l-1, how many of them are useful at the destination?
+        dst_connect = self.get_dst_connect(cs_table_ls, num_layers)
+
+        # save feature logs for the CS and related features
+        if self.should_save_ft_logs:
+            self.ft_log_filters(b, cs_table_ls, num_layers,
+                                src_connect, dst_connect)
+
+    # -------------------------------------------------------------------------
+    # ---------------------- DEFINING INPUT PLACEHOLDERS ----------------------
     # -------------------------------------------------------------------------
 
     def _define_inputs(self):
@@ -329,7 +505,7 @@ class DenseNet:
         self.is_training = tf.placeholder(tf.bool, shape=[])
 
     # -------------------------------------------------------------------------
-    # -----------------------BUILDING THE DENSENET GRAPH-----------------------
+    # ---------------------- BUILDING THE DENSENET GRAPH ----------------------
     # -------------------------------------------------------------------------
 
     # SIMPLEST OPERATIONS -----------------------------------------------------
@@ -341,8 +517,8 @@ class DenseNet:
         method which does not scale the variance.
 
         Args:
-            shape: `list` of `int`, shape of the weight matrix
-            name: `str`, a name for identifying the weight matrix
+            shape: `list` of `int`, shape of the weight matrix;
+            name: `str`, a name for identifying the weight matrix.
         """
         return tf.get_variable(
             name=name,
@@ -355,8 +531,8 @@ class DenseNet:
         within square kernels of side k and stride k.
 
         Args:
-            _input: tensor, the operation's input
-            k: `int`, the size and stride for the kernels
+            _input: tensor, the operation's input;
+            k: `int`, the size and stride for the kernels.
         """
         ksize = [1, k, k, 1]
         strides = [1, k, k, 1]
@@ -369,7 +545,7 @@ class DenseNet:
         Performs batch normalization on a given input (_input).
 
         Args:
-            _input: tensor, the operation's input
+            _input: tensor, the operation's input.
         """
         output = tf.contrib.layers.batch_norm(
             _input, scale=True, is_training=self.is_training,
@@ -379,23 +555,23 @@ class DenseNet:
     def conv2d(self, _input, out_features, kernel_size,
                strides=[1, 1, 1, 1], padding='SAME'):
         """
-        Creates a 2D convolutional layer (applies a certain number of
+        Creates a 2D convolutional filter layer (applies a certain number of
         kernels on some input features to obtain output features).
-        Returns the output of the layer and a reference to its kernel.
+        Returns the output of the layer and a reference to its filter.
 
         Args:
-            _input: tensor, the operation's input
-            out_features: `int`, number of feature maps at the output
-            kernel_size: `int`, size of the square kernels (their side)
-            strides: `list` of `int`, strides in each direction for kernels
-            padding: `str`, should we use padding ('SAME') or not ('VALID')
+            _input: tensor, the operation's input;
+            out_features: `int`, number of feature maps at the output;
+            kernel_size: `int`, size of the square kernels (their side);
+            strides: `list` of `int`, strides in each direction for kernels;
+            padding: `str`, should we use padding ('SAME') or not ('VALID').
         """
         in_features = int(_input.get_shape()[-1])
-        kernel = self.weight_variable_msra(
+        filter_ref = self.weight_variable_msra(
             [kernel_size, kernel_size, in_features, out_features],
-            name='kernel')
-        output = tf.nn.conv2d(_input, kernel, strides, padding)
-        return output, kernel
+            name='filter')
+        output = tf.nn.conv2d(_input, filter_ref, strides, padding)
+        return output, filter_ref
 
     def dropout(self, _input):
         """
@@ -404,7 +580,7 @@ class DenseNet:
         The dropout probability is the keep_prob parameter.
 
         Args:
-            _input: tensor, the operation's input
+            _input: tensor, the operation's input.
         """
         if self.keep_prob < 1:
             output = tf.cond(
@@ -416,7 +592,7 @@ class DenseNet:
             output = _input
         return output
 
-    # SIMPLEST OPERATIONS (FULLY CONNECTED)------------------------------------
+    # SIMPLEST OPERATIONS (FULLY CONNECTED) -----------------------------------
     # -------------------------------------------------------------------------
 
     def weight_variable_xavier(self, shape, name):
@@ -425,8 +601,8 @@ class DenseNet:
         initializer (keeps gradient scale roughly the same in all layers).
 
         Args:
-            shape: `list` of `int`, shape of the weight matrix
-            name: `str`, a name for identifying the weight matrix
+            shape: `list` of `int`, shape of the weight matrix;
+            name: `str`, a name for identifying the weight matrix.
         """
         return tf.get_variable(
             name,
@@ -438,8 +614,8 @@ class DenseNet:
         Creates bias terms for a fully-connected layer, initialized to 0.0.
 
         Args:
-            shape: `list` of `int`, shape of the bias matrix
-            name: `str`, a name for identifying the bias matrix
+            shape: `list` of `int`, shape of the bias matrix;
+            name: `str`, a name for identifying the bias matrix.
         """
         initial = tf.constant(0.0, shape=shape)
         return tf.get_variable(name, initializer=initial)
@@ -450,16 +626,16 @@ class DenseNet:
     def composite_function(self, _input, out_features, kernel_size=3):
         """
         Function H_l. Takes a concatenation of previous outputs and performs:
-        - batch normalization
-        - ReLU activation function
-        - 2d convolution, with required kernel size (side)
-        - dropout, if required (training the graph and keep_prob not set to 1)
-        Returns the output tensor and a reference to the 2d convolution kernel.
+        - batch normalization;
+        - ReLU activation function;
+        - 2d convolution, with required kernel size (side);
+        - dropout, if required (training the graph and keep_prob not set to 1).
+        Returns the output tensor and a reference to the 2d convolution filter.
 
         Args:
-            _input: tensor, the operation's input
-            out_features: `int`, number of feature maps at the output
-            kernel_size: `int`, size of the square kernels (their side)
+            _input: tensor, the operation's input;
+            out_features: `int`, number of feature maps at the output;
+            kernel_size: `int`, size of the square kernels (their side).
         """
         with tf.variable_scope("composite_function"):
             # batch normalization
@@ -467,26 +643,26 @@ class DenseNet:
             # ReLU activation function
             output = tf.nn.relu(output)
             # 2d convolution
-            output, kernel_ref = self.conv2d(
+            output, filter_ref = self.conv2d(
                 output, out_features=out_features, kernel_size=kernel_size)
             # dropout (if the graph is being trained and keep_prob is not 1)
             output = self.dropout(output)
-        return output, kernel_ref
+        return output, filter_ref
 
     def bottleneck(self, _input, out_features):
         """
         Bottleneck function, used before composite function H_l in DenseNet-BC,
         takes a concatenation of previous outputs and performs:
-        - batch normalization
-        - ReLU activation function
-        - 2d convolution, with kernel size 1 (produces 4x the features of H_l)
-        - dropout, if required (training the graph and keep_prob not set to 1)
+        - batch normalization,
+        - ReLU activation function,
+        - 2d convolution, with kernel size 1 (produces 4x the features of H_l),
+        - dropout, if required (training the graph and keep_prob not set to 1).
         Returns the output tensor and a reference to the 2d convolution kernel.
 
         Args:
-            _input: tensor, the operation's input
-            out_features: `int`, number of feature maps at the output of H_l
-            kernel_size: `int`, size of the square kernels (their side)
+            _input: tensor, the operation's input;
+            out_features: `int`, number of feature maps at the output of H_l;
+            kernel_size: `int`, size of the square kernels (their side).
         """
         with tf.variable_scope("bottleneck"):
             # batch normalization
@@ -495,12 +671,12 @@ class DenseNet:
             output = tf.nn.relu(output)
             inter_features = out_features * 4
             # 2d convolution (produces intermediate features)
-            output, kernel_ref = self.conv2d(
+            output, filter_ref = self.conv2d(
                 output, out_features=inter_features, kernel_size=1,
                 padding='VALID')
             # dropout (if the graph is being trained and keep_prob is not 1)
             output = self.dropout(output)
-        return output, kernel_ref
+        return output, filter_ref
 
     # BLOCKS AND THEIR INTERNAL LAYERS ----------------------------------------
     # -------------------------------------------------------------------------
@@ -514,26 +690,26 @@ class DenseNet:
         the previous layers, resulting in [x_0, ..., x_l-1, x_l].
 
         Args:
-            _input: tensor, the operation's input
-            layer: `int`, identifier number for this layer (within a block)
-            growth_rate: `int`, number of new convolutions per dense layer
+            _input: tensor, the operation's input;
+            layer: `int`, identifier number for this layer (within a block);
+            growth_rate: `int`, number of new convolutions per dense layer.
         """
         with tf.variable_scope("layer_%d" % layer):
             # use the composite function H_l (3x3 kernel conv)
             if not self.bc_mode:
-                comp_out, kernel_ref = self.composite_function(
+                comp_out, filter_ref = self.composite_function(
                     _input, out_features=growth_rate, kernel_size=3)
             # in DenseNet-BC mode, add a bottleneck layer before H_l (1x1 conv)
             elif self.bc_mode:
-                bottleneck_out, kernel_ref = self.bottleneck(
+                bottleneck_out, filter_ref = self.bottleneck(
                     _input, out_features=growth_rate)
-                if self.check_kernel_features:
-                    self.kernel_ref_list[-1].append(kernel_ref)
-                comp_out, kernel_ref = self.composite_function(
+                if self.ft_filters or self.should_self_construct:
+                    self.filter_ref_list[-1].append(filter_ref)
+                comp_out, filter_ref = self.composite_function(
                     bottleneck_out, out_features=growth_rate, kernel_size=3)
-            # save a reference to the composite function's kernel
-            if self.check_kernel_features:
-                self.kernel_ref_list[-1].append(kernel_ref)
+            # save a reference to the composite function's filter
+            if self.ft_filters or self.should_self_construct:
+                self.filter_ref_list[-1].append(filter_ref)
             # concatenate output of H_l with layer input (all previous outputs)
             if TF_VERSION[0] >= 1 and TF_VERSION[1] >= 0:
                 output = tf.concat(axis=3, values=(_input, comp_out))
@@ -548,14 +724,14 @@ class DenseNet:
         as defined in the paper.
 
         Args:
-            _input: tensor, the operation's input
-            block: `int`, identifier number for this block
-            growth_rate: `int`, number of new convolutions per dense layer
-            layers_in_block: `int`, number of dense layers in this block
-            is_last: `bool`, is this the last block in the network or not
+            _input: tensor, the operation's input;
+            block: `int`, identifier number for this block;
+            growth_rate: `int`, number of new convolutions per dense layer;
+            layers_in_block: `int`, number of dense layers in this block;
+            is_last: `bool`, is this the last block in the network or not.
         """
-        if self.check_kernel_features:
-            self.kernel_ref_list.append([])
+        if self.ft_filters or self.should_self_construct:
+            self.filter_ref_list.append([])
         if is_last:
             self.cross_entropy = []
 
@@ -564,7 +740,7 @@ class DenseNet:
             for layer in range(layers_in_block):
                 output = self.add_internal_layer(output, layer, growth_rate)
 
-                if is_last and self.measure_layer_cr_entr:
+                if is_last and self.ft_cross_entropies:
                     # Save the cross-entropy for all layers except the last one
                     # (it is always saved as part of the end-graph operations)
                     if layer != layers_in_block-1:
@@ -588,18 +764,18 @@ class DenseNet:
         change the output's size.
 
         Args:
-            _input: tensor, the operation's input
-            block: `int`, identifier number for the previous block
+            _input: tensor, the operation's input;
+            block: `int`, identifier number for the previous block.
         """
         with tf.variable_scope("Transition_after_block_%d" % block):
             # add feature map compression in DenseNet-BC mode
             out_features = int(int(_input.get_shape()[-1]) * self.reduction)
             # use the composite function H_l (1x1 kernel conv)
-            output, kernel_ref = self.composite_function(
+            output, filter_ref = self.composite_function(
                 _input, out_features=out_features, kernel_size=1)
-            # save a reference to the composite function's kernel
-            if self.check_kernel_features:
-                self.kernel_ref_list[-1].append(kernel_ref)
+            # save a reference to the composite function's filter
+            if self.ft_filters or self.should_self_construct:
+                self.filter_ref_list[-1].append(filter_ref)
             # use average pooling to reduce feature map size
             output = self.avg_pool(output, k=2)
         return output
@@ -608,16 +784,16 @@ class DenseNet:
         """
         Adds the transition layer after the last block. This layer outputs the
         estimated probabilities by classes. It performs:
-        - batch normalization
-        - ReLU activation function
-        - wider-than-normal average pooling
-        - reshaping the output into a 1D tensor
-        - fully-connected layer (matrix multiplication, weights and biases)
+        - batch normalization,
+        - ReLU activation function,
+        - wider-than-normal average pooling,
+        - reshaping the output into a 1D tensor,
+        - fully-connected layer (matrix multiplication, weights and biases).
 
         Args:
-            _input: tensor, the operation's input
-            block: `int`, identifier number for the last block
-            layer: `int`, identifier number for the last layer in that block
+            _input: tensor, the operation's input;
+            block: `int`, identifier number for the last block;
+            layer: `int`, identifier number for the last layer in that block.
         """
         with tf.variable_scope("Transition_to_classes_block_%d_layer_%d" %
                                (block, layer)):
@@ -649,10 +825,10 @@ class DenseNet:
         calculated cross-entropy.
 
         Args:
-            _input: tensor, the operation's input
-            labels: tensor, the expected labels (classes) for the data
-            block: `int`, identifier number for the last block
-            layer: `int`, identifier number for the last layer in that block
+            _input: tensor, the operation's input;
+            labels: tensor, the expected labels (classes) for the data;
+            block: `int`, identifier number for the last block;
+            layer: `int`, identifier number for the last layer in that block.
         """
         # add the FC transition layer to the classes (+ softmax).
         logits = self.transition_layer_to_classes(_input, block, layer)
@@ -715,7 +891,7 @@ class DenseNet:
         self.layer_num_list[-1] += 1
 
         # Refresh the cross-entropy list if not measuring layer cross-entropies
-        if not self.measure_layer_cr_entr:
+        if not self.ft_cross_entropies:
             self.cross_entropy = []
 
         if not self.bc_mode:
@@ -775,11 +951,11 @@ class DenseNet:
 
         # first add a 3x3 convolution layer with first_output_features outputs
         with tf.variable_scope("Initial_convolution"):
-            self.output, kernel_ref = self.conv2d(
+            self.output, filter_ref = self.conv2d(
                 self.output, out_features=self.first_output_features,
                 kernel_size=3)
-            if self.check_kernel_features:
-                self.kernel_ref_list = [[kernel_ref]]
+            if self.ft_filters or self.should_self_construct:
+                self.filter_ref_list = [[filter_ref]]
 
         # then add the required blocks
         for block in range(self.total_blocks):
@@ -793,7 +969,7 @@ class DenseNet:
         self._define_end_graph_operations()
 
     # -------------------------------------------------------------------------
-    # -------------------INITIALIZING THE TENSORFLOW SESSION-------------------
+    # ------------------ INITIALIZING THE TENSORFLOW SESSION ------------------
     # -------------------------------------------------------------------------
 
     def _initialize_uninitialized_variables(self):
@@ -852,7 +1028,7 @@ class DenseNet:
             self.feature_writer = open('./%s.csv' % self.ft_logs_path, "w")
 
     # -------------------------------------------------------------------------
-    # --------------------COUNTING ALL TRAINABLE PARAMETERS--------------------
+    # ------------------- COUNTING ALL TRAINABLE PARAMETERS -------------------
     # -------------------------------------------------------------------------
 
     def _count_trainable_params(self):
@@ -871,20 +1047,20 @@ class DenseNet:
         print("Total trainable params: %.1fk" % (total_parameters / 1e3))
 
     # -------------------------------------------------------------------------
-    # ---------------------TRAINING AND TESTING THE MODEL----------------------
+    # -------------------- TRAINING AND TESTING THE MODEL ---------------------
     # -------------------------------------------------------------------------
 
     def print_relevant_features(self, loss, accuracy, epoch):
         """
         Prints on console the current values of relevant features.
         If feature logs are being saved, this function also saves these values.
-        If images are being saved, kernel states are also saved as images.
+        If images are being saved, filter states are also saved as images.
 
         Args:
             loss: `list` of `float`, validation set loss (cross_entropy) for
-                this epoch, corresponding to each internal layer of the graph
-            accuracy: `float`, validation set accuracy for this epoch
-            epoch: `int`, current training epoch
+                this epoch, corresponding to each internal layer of the graph;
+            accuracy: `float`, validation set accuracy for this epoch;
+            epoch: `int`, current training epoch.
         """
         # print the current accuracy and the cross-entropy for each layer
         print("Current validation accuracy = %f" % accuracy)
@@ -902,34 +1078,35 @@ class DenseNet:
                                            ).replace(".", ","))
             self.feature_writer.write('\"\"')
 
-        if self.check_kernel_features:
-            # process kernels, sometimes save images and/or their mean and std
-            print('-' * 40 + "\nProcessing kernels:")
-            for b in range(-1, self.total_blocks):
-                for k in range(len(self.kernel_ref_list[b+1])):
-                    self.process_kernels(
-                        self.kernel_ref_list[b+1][k], b, k, epoch)
+        if self.ft_filters:
+            # process filters, sometimes save images and/or their mean and std
+            print('-' * 40 + "\nProcessing filters:")
+            print('\n* Global input data (post-processed):')
+            for b in range(0, self.total_blocks):
+                self.process_block_filters(b, epoch)
 
         print('-' * 40)
         if self.should_save_ft_logs:
             self.feature_writer.write('\n')
 
-    def self_constructing_epoch(self, epoch):
+    def self_constructing_epoch(self, epoch, epoch_last_block):
         """
         The self-constructing step for one training epoch. Adds new layers
         and/or blocks depending on parameters.
         Returns True if training should continue, False otherwise.
 
         Args:
-            epoch: `int`, current training epoch
+            epoch: `int`, current training epoch;
+            epoch_last_block: `int`, training epoch at which the last block was
+                added to the architecture.
         """
         # naive W.I.P. self-constructing algorithm
         # useful to test the effects of adding layers/blocks at certain moments
         continue_training = True
-        if epoch != 1 and epoch <= 40:
+        if epoch-epoch_last_block != 1 and epoch-epoch_last_block <= 300:
             # if (epoch-1) % 20 == 0:
             #     self._new_block()
-            if (epoch-1) % 10 == 0:
+            if (epoch-1) % 40 == 0:
                 self._new_layer()
 
         return continue_training
@@ -939,9 +1116,9 @@ class DenseNet:
         Trains the model for one epoch using data from the proper training set.
 
         Args:
-            data: training data yielded by the dataset's data provider
-            batch_size: `int`, number of examples in a training batch
-            learning_rate: `int`, learning rate for the optimizer
+            data: training data yielded by the dataset's data provider;
+            batch_size: `int`, number of examples in a training batch;
+            learning_rate: `int`, learning rate for the optimizer.
         """
         num_examples = data.num_examples
         total_loss = []
@@ -978,8 +1155,8 @@ class DenseNet:
         Tests the model using the proper testing set.
 
         Args:
-            data: testing data yielded by the dataset's data provider
-            batch_size: `int`, number of examples in a testing batch
+            data: testing data yielded by the dataset's data provider;
+            batch_size: `int`, number of examples in a testing batch.
         """
         num_examples = data.num_examples
         total_loss = []
@@ -1014,30 +1191,30 @@ class DenseNet:
         specified in the train_params argument.
 
         Args (in train_params):
-            batch_size: `int`, number of examples in a training batch
-            max_n_epochs: `int`, maximum number of training epochs to run
-            initial_learning_rate: `int`, initial learning rate for optimizer
+            batch_size: `int`, number of examples in a training batch;
+            max_n_epochs: `int`, maximum number of training epochs to run;
+            initial_learning_rate: `int`, initial learning rate for optimizer;
             reduce_lr_epoch_1: `int`, if not self-constructing the network,
                 first epoch where the current learning rate is divided by 10
-                (initial_learning_rate/10)
+                (initial_learning_rate/10);
             reduce_lr_epoch_2: `int`, if not self-constructing the network,
                 second epoch where the current learning rate is divided by 10
-                (initial_learning_rate/100)
-            validation_set: `bool`, should a validation set be used or not
-            validation_split: `int` or None
-                `float`: chunk of the training set used as the validation set
-                None: use the testing set as the validation set
-            shuffle: `str` or None, or `bool`
+                (initial_learning_rate/100);
+            validation_set: `bool`, should a validation set be used or not;
+            validation_split: `float` or None;
+                `float`: chunk of the training set used as the validation set;
+                None: use the testing set as the validation set;
+            shuffle: `str` or None, or `bool`;
                 `str` or None: used with CIFAR datasets, should we shuffle the
-                data only before training ('once_prior_train'), on every epoch
-                ('every_epoch') or not at all (None)
-                `bool`: used with SVHN, should we shuffle the data or not
-            normalization: `str` or None
-                None: don't use any normalization for pixels
-                'divide_255': divide all pixels by 255
-                'divide_256': divide all pixels by 256
+                    data only before training ('once_prior_train'), on every
+                    epoch ('every_epoch') or not at all (None);
+                `bool`: used with SVHN, should we shuffle the data or not;
+            normalization: `str` or None;
+                None: don't use any normalization for pixels;
+                'divide_255': divide all pixels by 255;
+                'divide_256': divide all pixels by 256;
                 'by_chanels': substract the mean of the pixel's chanel and
-                    divide the result by the channel's standard deviation
+                    divide the result by the channel's standard deviation.
         """
         max_n_epochs = train_params['max_n_epochs']
         learning_rate = train_params['initial_learning_rate']
@@ -1046,7 +1223,8 @@ class DenseNet:
         reduce_lr_epoch_2 = train_params['reduce_lr_epoch_2']
         total_start_time = time.time()
 
-        epoch = 1
+        epoch = 1             # current training epoch
+        epoch_last_block = 0  # epoch at which the last block was added
         while epoch < max_n_epochs + 1:
             # only print epoch name on certain epochs
             if (epoch-1) % self.feature_period == 0:
@@ -1082,7 +1260,7 @@ class DenseNet:
 
             # self-constructing step
             if self.should_self_construct:
-                if not self.self_constructing_epoch(epoch):
+                if not self.self_constructing_epoch(epoch, epoch_last_block):
                     break
 
             # measure training time for this epoch

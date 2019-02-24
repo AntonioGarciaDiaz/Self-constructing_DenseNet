@@ -9,7 +9,7 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 # Training parameters for CIFAR datasets (10, 100, 10+, 100+).
 train_params_cifar = {
     'batch_size': 64,
-    'max_n_epochs': 80,  # default was 300
+    'max_n_epochs': 300,  # default was 300
     'initial_learning_rate': 0.1,
     'reduce_lr_epoch_1': 20,  # epochs * 0.5, default was 150
     'reduce_lr_epoch_2': 30,  # epochs * 0.75, default was 225
@@ -61,10 +61,9 @@ if __name__ == '__main__':
         default='DenseNet',
         help='Choice of model to use (use bottleneck + compression or not).')
     parser.add_argument(
-        '--growth_rate', '-k', type=int, choices=[12, 24, 40],
-        default=12,
-        help='Growth rate (number of new convolutions per dense layer), '
-             'restricted to choices in paper.')
+        '--growth_rate', '-k', type=int,
+        default=12,  # choices in paper: 12, 24, 40.
+        help='Growth rate (number of new convolutions per dense layer).')
     parser.add_argument(
         '--dataset', '-ds', type=str,
         choices=['C10', 'C10+', 'C100', 'C100+', 'SVHN'],
@@ -111,7 +110,7 @@ if __name__ == '__main__':
 
     # Wether or not to write CSV feature logs.
     parser.add_argument(
-        '--feature_period', '--ft_period', '-fp', type=int, default=5,
+        '--feature_period', '--ft_period', '-fp', type=int, default=1,
         help='Number of epochs between each measurement of feature values.')
     parser.add_argument(
         '--feature-logs', '--ft-logs', dest='should_save_ft_logs',
@@ -123,25 +122,28 @@ if __name__ == '__main__':
         help='Do not record feature values in a CSV log.')
     parser.set_defaults(should_save_ft_logs=True)
 
-    # Wether or not to measure certain feature values (for feature logs).
+    # Wether or not to write certain feature values in feature logs.
     parser.add_argument(
-        '--kernel-features', dest='check_kernel_features', action='store_true',
-        help='Measure feature values from convolution kernels'
-             '(e.g. the mean and std of a filter\'s kernel values).')
+        '--feature-filters', '--ft-filters',
+        dest='ft_filters', action='store_true',
+        help='Write feature values from convolution filters'
+             '(e.g. the mean and std of a filter\'s kernel weights).')
     parser.add_argument(
-        '--no-kernel-features', dest='check_kernel_features',
-        action='store_false',
-        help='Do not measure feature values from kernels.')
-    parser.set_defaults(check_kernel_features=True)
+        '--no-feature-filters', '--no-ft-filters',
+        dest='ft_filters', action='store_false',
+        help='Do not write feature values from filters.')
+    parser.set_defaults(ft_filters=True)
     parser.add_argument(
-        '--layer-cross-entropies', '--layer-cr-entr',
-        dest='measure_layer_cr_entr', action='store_true',
-        help='Measure cross-entropy values for all layers in the last block.')
+        '--feature-cross-entropies', '--ft-cross-entropies', '--ft-cr-entr',
+        dest='ft_cross_entropies', action='store_true',
+        help='Measure and write cross-entropy values'
+             'corresponding to all layers in the last block.')
     parser.add_argument(
-        '--no-layer-cross-entropies', '--no-layer-cr-entr',
-        dest='measure_layer_cr_entr', action='store_false',
-        help='Do not measure cross-entropy values.')
-    parser.set_defaults(measure_layer_cr_entr=False)
+        '--no-feature-cross-entropies', '--no-ft-cross-entropies',
+        '--no-ft-cr-entr', dest='ft_cross_entropies', action='store_false',
+        help='Do not measure and write cross-entropy values'
+             '(only the real cross-entropy).')
+    parser.set_defaults(ft_cross_entropies=False)
 
     # Wether or not to save the model's state (to load it back in the future).
     parser.add_argument(
@@ -152,10 +154,10 @@ if __name__ == '__main__':
         help='Do not save model during training.')
     parser.set_defaults(should_save_model=True)
 
-    # Wether or not to save image data, such as representations of kernels.
+    # Wether or not to save image data, such as representations of filters.
     parser.add_argument(
         '--images', dest='should_save_images', action='store_true',
-        help='Produce and save image files (e.g. representing kernel states).')
+        help='Produce and save image files (e.g. representing filter states).')
     parser.add_argument(
         '--no-images', dest='should_save_images', action='store_false',
         help='Do not produce and save image files.')
