@@ -266,8 +266,7 @@ class DenseNet:
         ])
         self.summary_writer.add_summary(summary, epoch)
 
-    def ft_log_filters(self, b, cs_table_ls, num_layers,
-                       src_connect, dst_connect):
+    def ft_log_filters(self, b, cs_table_ls, src_connect, dst_connect):
         """
         Write a feature log with data concerning filters: the CS of every
         connection in a given block, the source and destination connectivities
@@ -277,13 +276,13 @@ class DenseNet:
             b: `int`, identifier number for the block;
             cs_table_ls: `list` of `list` of `float`, the table of CS for each
                 connection to a layer l from a source layer s;
-            num_layers: the number of layers in the block (this includes the
-                transition layer if it exists);
-            src_connect: source connectivity for all layers in the block;
-            dst_connect: destination connectivity for all layers in the block.
+            src_connect: `list` of `float`, source connectivity
+                for all layers in the block;
+            dst_connect: `list` of `float`, destination connectivity
+                for all layers in the block.
         """
         # printing and saving the data to feature logs
-        for l in range(num_layers):
+        for l in range(self.layer_num_list[b]):
             # source connectivity of l-1
             print('  - Source connectivity = %f' % (src_connect[l]))
             self.feature_writer.write((';\"%f\"' % (src_connect[l])
@@ -291,7 +290,7 @@ class DenseNet:
             self.feature_writer.write(';\"\"')
 
             # destination layer normalised CS (sent from l-1 towards d)
-            for d in range(l, num_layers):
+            for d in range(l, self.layer_num_list[b]):
                 print('  - Towards layer %d: normalised CS = %f' % (
                     d, cs_table_ls[d][l]/max(
                         fwd[l] for fwd in cs_table_ls if len(fwd) > l)))
@@ -350,7 +349,7 @@ class DenseNet:
 
         return cs_list
 
-    def get_src_connect(self, cs_table_ls, num_layers, tresh_fraction=0.67):
+    def get_src_connect(self, b, cs_table_ls, tresh_fraction=0.67):
         """
         Get the source connectivity for all layers (filters) in a block.
         The source connectivity of a layer l expresses how many of the
@@ -359,28 +358,27 @@ class DenseNet:
         if the connection's CS is >= tresh_fraction * the max CS for l.
 
         Args:
+            b: `int`, identifier number for the block;
             cs_table_ls: `list` of `list` of `float`, the table of CS for each
                 connection to a layer l from a source layer s;
-            num_layers: the number of layers in the block (this includes the
-                transition layer if it exists);
             tresh_fraction: `float`, the fraction of a layer's max CS that a CS
                 is compared to to be considered 'useful enough'.
         """
         src_connect = []
         max_cs = 0  # the max CS for each future layer
 
-        for s in range(num_layers):
+        for s in range(self.layer_num_list[b]):
             src_connect.append(0)
-            for l in range(num_layers):
+            for l in range(self.layer_num_list[b]):
                 if len(cs_table_ls[l]) > s:
                     max_cs = max(cs_table_ls[l])
                     src_connect[s] += int(cs_table_ls[l][s]/max_cs >= 0.67)
             # normalised in order to make it a fraction
-            src_connect[s] /= num_layers - s
+            src_connect[s] /= self.layer_num_list[b] - s
 
         return src_connect
 
-    def get_dst_connect(self, cs_table_ls, num_layers, tresh_fraction=0.67):
+    def get_dst_connect(self, b, cs_table_ls, tresh_fraction=0.67):
         """
         Get the destination connectivity for all layers (filters) in a block.
         The source connectivity of a layer l expresses how many of the
@@ -391,17 +389,16 @@ class DenseNet:
         N.B.: For l=0, the preceding l-1 is the output from the last block.
 
         Args:
+            b: `int`, identifier number for the block;
             cs_table_ls: `list` of `list` of `float`, the table of CS for each
                 connection to a layer l from a source layer s;
-            num_layers: the number of layers in the block (this includes the
-                transition layer if it exists);
             tresh_fraction: `float`, the fraction of a layer's max CS that a CS
                 is compared to to be considered 'useful enough'.
         """
         dst_connect = []
         max_cs = 0  # the max CS for each future layer
 
-        for d in range(num_layers):
+        for d in range(self.layer_num_list[b]):
             dst_connect.append(0)
             for l in range(len(cs_table_ls[d])):
                 max_cs = max(fwd[l] for fwd in cs_table_ls if len(fwd) > l)
@@ -449,9 +446,9 @@ class DenseNet:
 
     def process_block_filters(self, b, epoch):
         """
-        Process a given block's filters. In some cases record data related
-        to the filters' kernel weights (e.g. connection strengths) in the
-        feature logs, and/or save representations of the filters as PNG images.
+        Process a given block's filters. Return values for features related to
+        the filters' kernel weights: connection strengths, source
+        connectivities, and destination connectivities.
 
         Args:
             b: `int`, identifier number for the block;
@@ -464,20 +461,16 @@ class DenseNet:
             if not self.bc_mode or not f % 2:
                 cs_table_ls.append(self.process_filter(
                     self.filter_ref_list[b+1][f], b, f, epoch))
-        num_layers = len(cs_table_ls)  # this includes any transition layer
 
         # source connectivity: among all the connections recieved by
         # a layer l, how many of them are useful at the level of l?
-        src_connect = self.get_src_connect(cs_table_ls, num_layers)
+        src_connect = self.get_src_connect(b, cs_table_ls)
 
         # destination connectivity: among all the connections sent from
         # a layer l-1, how many of them are useful at the destination?
-        dst_connect = self.get_dst_connect(cs_table_ls, num_layers)
+        dst_connect = self.get_dst_connect(b, cs_table_ls)
 
-        # save feature logs for the CS and related features
-        if self.should_save_ft_logs:
-            self.ft_log_filters(b, cs_table_ls, num_layers,
-                                src_connect, dst_connect)
+        return(cs_table_ls, src_connect, dst_connect)
 
     # -------------------------------------------------------------------------
     # ---------------------- DEFINING INPUT PLACEHOLDERS ----------------------
@@ -1053,8 +1046,8 @@ class DenseNet:
     def print_relevant_features(self, loss, accuracy, epoch):
         """
         Prints on console the current values of relevant features.
-        If feature logs are being saved, this function also saves these values.
-        If images are being saved, filter states are also saved as images.
+        If feature logs are being saved, this function saves feature values.
+        If images are being saved, it also saves filter features as images.
 
         Args:
             loss: `list` of `float`, validation set loss (cross_entropy) for
@@ -1079,11 +1072,12 @@ class DenseNet:
             self.feature_writer.write('\"\"')
 
         if self.ft_filters:
-            # process filters, sometimes save images and/or their mean and std
+            # process filters, sometimes save their state as images
             print('-' * 40 + "\nProcessing filters:")
             print('\n* Global input data (post-processed):')
             for b in range(0, self.total_blocks):
-                self.process_block_filters(b, epoch)
+                cs, s_cnct, d_cnct = self.process_block_filters(b, epoch)
+                self.ft_log_filters(b, cs, s_cnct, d_cnct)
 
         print('-' * 40)
         if self.should_save_ft_logs:
