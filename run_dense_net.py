@@ -99,7 +99,7 @@ if __name__ == '__main__':
         help='Do not apply a self-constructing algorithm.')
     parser.set_defaults(should_self_construct=True)
     parser.add_argument(
-        '--ascension_threshold', '--asc_thresh', '-at'
+        '--ascension_threshold', '--asc_thresh', '-at',
         dest='asc_thresh', type=int, default=10,
         help='Ascension threshold, for the self-constructing algorithm:'
              ' number of epochs before adding a new layer.')
