@@ -74,10 +74,10 @@ if __name__ == '__main__':
         type=str, default='1', metavar='',
         help='List of the number of layers in each block, separated by comas'
              ' (e.g. \'12,12,12\', default: 1 block with 1 layer)'
-             'WARNING: in BC models, each layer is preceded by a bottleneck.')
+             ' WARNING: in BC models, each layer is preceded by a bottleneck.')
     parser.add_argument(
         '--keep_prob', '-kp', type=float, metavar='',
-        help="Keeping probability, for dropout")
+        help='Keeping probability, for dropout')
     parser.add_argument(
         '--weight_decay', '-wd', type=float, default=1e-4, metavar='',
         help='Weight decay, for optimizer (default: %(default)s).')
@@ -92,12 +92,16 @@ if __name__ == '__main__':
     parser.add_argument(
         '--self-construct', dest='should_self_construct', action='store_true',
         help='Apply a self-constructing algorithm for modifying'
-             'the network\'s architecture during training.')
+             ' the network\'s architecture during training.')
     parser.add_argument(
         '--no-self-construct', dest='should_self_construct',
         action='store_false',
         help='Do not apply a self-constructing algorithm.')
     parser.set_defaults(should_self_construct=True)
+    parser.add_argument(
+        '--ascension_threshold', '--asc_thresh', '-at', type=int, default=10,
+        help='Ascension threshold, for the self-constructing algorithm:'
+             ' number of epochs before adding a new layer.')
 
     # Wether or not to write TensorFlow logs.
     parser.add_argument(
@@ -110,9 +114,6 @@ if __name__ == '__main__':
 
     # Wether or not to write CSV feature logs.
     parser.add_argument(
-        '--feature_period', '--ft_period', '-fp', type=int, default=1,
-        help='Number of epochs between each measurement of feature values.')
-    parser.add_argument(
         '--feature-logs', '--ft-logs', dest='should_save_ft_logs',
         action='store_true',
         help='Record the evolution of feature values in a CSV log.')
@@ -121,13 +122,16 @@ if __name__ == '__main__':
         action='store_false',
         help='Do not record feature values in a CSV log.')
     parser.set_defaults(should_save_ft_logs=True)
+    parser.add_argument(
+        '--feature_period', '--ft_period', '-fp', type=int, default=1,
+        help='Number of epochs between each measurement of feature values.')
 
     # Wether or not to write certain feature values in feature logs.
     parser.add_argument(
         '--feature-filters', '--ft-filters',
         dest='ft_filters', action='store_true',
         help='Write feature values from convolution filters'
-             '(e.g. the mean and std of a filter\'s kernel weights).')
+             ' (e.g. the mean and std of a filter\'s kernel weights).')
     parser.add_argument(
         '--no-feature-filters', '--no-ft-filters',
         dest='ft_filters', action='store_false',
@@ -137,12 +141,12 @@ if __name__ == '__main__':
         '--feature-cross-entropies', '--ft-cross-entropies', '--ft-cr-entr',
         dest='ft_cross_entropies', action='store_true',
         help='Measure and write cross-entropy values'
-             'corresponding to all layers in the last block.')
+             ' corresponding to all layers in the last block.')
     parser.add_argument(
         '--no-feature-cross-entropies', '--no-ft-cross-entropies',
         '--no-ft-cr-entr', dest='ft_cross_entropies', action='store_false',
         help='Do not measure and write cross-entropy values'
-             '(only the real cross-entropy).')
+             ' (only the real cross-entropy).')
     parser.set_defaults(ft_cross_entropies=False)
 
     # Wether or not to save the model's state (to load it back in the future).
@@ -180,7 +184,7 @@ if __name__ == '__main__':
     parser.add_argument(
         '--num_intra_threads', '-intra', type=int, default=128, metavar='',
         help='Number of intra-operation CPU threads '
-             '(for paralellizing the inference/testing phase).')
+             ' (for paralellizing the inference/testing phase).')
 
     args = parser.parse_args()
 
