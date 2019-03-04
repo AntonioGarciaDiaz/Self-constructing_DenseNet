@@ -14,7 +14,7 @@ is the mean of the absolute kernel weights associated with the connection :math:
 Usually this value is normalised - that is, divided by the max CS for a set value of :math:`s` or :math:`l`, to give it a value between 0 and 1.
 
 The **source connectivity** of a layer :math:`l` is also a value between 0 and 1. It expresses how many of the connections recieved by :math:`l` are treated as 'useful enough' by it.
-For each connection from a previous layer :math:`s` (between the previous block's output and :math:`l-1`), the connectivity is increased by :math:`1/(l+1)` if the connection's CS is :math:`\geq 0.67` * the max CS for :math:`s`.
+For each connection from a previous layer :math:`s` (between the previous block's output and :math:`l-1`), the connectivity is increased by :math:`1/(l+1)` if the connection's CS is >= 0.67 * the max CS for :math:`s`.
 
 In the current self-constructing algorithm, a new layer is added to the last block every :code:`asc_thresh` epochs, until at least one layer in the block has a "source connectivity" equal to 1. Here :code:`asc_thresh` is a constant parameter with a default value of 10.
 Experiments are currently being undertaken to implement a more efficient self-constructing algorithm.

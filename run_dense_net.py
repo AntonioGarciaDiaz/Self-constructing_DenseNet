@@ -99,7 +99,8 @@ if __name__ == '__main__':
         help='Do not apply a self-constructing algorithm.')
     parser.set_defaults(should_self_construct=True)
     parser.add_argument(
-        '--ascension_threshold', '--asc_thresh', '-at', type=int, default=10,
+        '--ascension_threshold', '--asc_thresh', '-at'
+        dest='asc_thresh', type=int, default=10,
         help='Ascension threshold, for the self-constructing algorithm:'
              ' number of epochs before adding a new layer.')
 
@@ -123,7 +124,8 @@ if __name__ == '__main__':
         help='Do not record feature values in a CSV log.')
     parser.set_defaults(should_save_ft_logs=True)
     parser.add_argument(
-        '--feature_period', '--ft_period', '-fp', type=int, default=1,
+        '--feature_period', '--ft_period', '-fp',
+        dest='ft_period', type=int, default=1,
         help='Number of epochs between each measurement of feature values.')
 
     # Wether or not to write certain feature values in feature logs.
