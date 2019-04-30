@@ -20,7 +20,7 @@ class DenseNet:
     def __init__(self, data_provider, growth_rate, layer_num_list,
                  keep_prob, num_inter_threads, num_intra_threads,
                  weight_decay, nesterov_momentum, model_type, dataset,
-                 should_self_construct, asc_thresh,
+                 should_self_construct, asc_thresh, patience_param,
                  should_save_logs, should_save_ft_logs, ft_period,
                  ft_filters, ft_cross_entropies,
                  should_save_model, should_save_images,
@@ -46,6 +46,7 @@ class DenseNet:
             dataset: `str`, dataset name;
             should_self_construct: `bool`, should use self-constructing or not;
             asc_thresh: `int`, ascension threshold for self-constructing;
+            patience_param: `int`, patience parameter for self-constructing;
             should_save_logs: `bool`, should tensorflow logs be saved or not;
             should_save_ft_logs: `bool`, should feature logs be saved or not;
             ft_period: `int`, number of epochs between two measurements of
@@ -99,6 +100,8 @@ class DenseNet:
         self.dataset_name = dataset
         self.should_self_construct = should_self_construct
         self.asc_thresh = asc_thresh
+        self.patience_param = patience_param
+        self.patience_countdown = patience_param
 
         self.should_save_logs = should_save_logs
         self.should_save_ft_logs = should_save_ft_logs
@@ -129,7 +132,7 @@ class DenseNet:
         save_path = 'saves/%s' % self.model_identifier
         if self.should_save_model:
             os.makedirs(save_path, exist_ok=True)
-        save_path = os.path.join(save_path, 'model.chkpt')
+        save_path = '%s/%s' % (save_path, 'model.chkpt')
         self._save_path = save_path
 
         logs_path = 'logs/%s' % self.model_identifier
@@ -268,55 +271,57 @@ class DenseNet:
         ])
         self.summary_writer.add_summary(summary, epoch)
 
-    def ft_log_filters(self, b, cs_table_ls, dst_connect, src_connect):
+    def ft_log_filters(self, b, cs_table_ls, relev_dst, relev_src):
         """
         Write a feature log with data concerning filters: the CS of every
-        connection in a given block, the destination and source connectivities
+        connection in a given block, the relevance for destinations and sources
         for all layers in the same block.
 
         Args:
             b: `int`, identifier number for the block;
             cs_table_ls: `list` of `list` of `float`, the table of CS for each
                 connection to a layer l from a previous layer s;
-            dst_connect: `list` of `float`, destination connectivity
+            relev_dst: `list` of `float`, relevance for destinations
                 for all layers in the block;
-            src_connect: `list` of `float`, source connectivity
+            relev_src: `list` of `float`, relevance for sources
                 for all layers in the block.
         """
         # printing and saving the data to feature logs
         for l in range(self.layer_num_list[b]):
-            # destination connectivity of l-1
-            print('  - Destination connectivity = %f' % (dst_connect[l]))
-            self.feature_writer.write((';\"%f\"' % (dst_connect[l])
-                                       ).replace(".", ","))
-            self.feature_writer.write(';\"\"')
-
+            # relevance for destinations of l-1
+            print('  - Relevance for destinations = %f' % (relev_dst[l]))
             # destination layer normalised CS (sent from l-1 towards d)
             for d in range(l, self.layer_num_list[b]):
                 print('  - Towards layer %d: normalised CS = %f' % (
                     d, cs_table_ls[d][l]/max(
                         fwd[l] for fwd in cs_table_ls if len(fwd) > l)))
-                self.feature_writer.write((
-                    ';\"%f\"' % (cs_table_ls[d][l]/max(
-                        fwd[l] for fwd in cs_table_ls if len(fwd) > l))
-                    ).replace(".", ","))
-            self.feature_writer.write(';\"\"')
 
             print('\n* Block %d filter %d:' % (b, l))
-
-            # source layer normalised CS (recieved at l from s)
+            # source layer normalised CS (received at l from s)
             for s in range(len(cs_table_ls[l])):
                 print('  - From layer %d: normalised CS = %f' % (
                     s, cs_table_ls[l][s]/max(cs_table_ls[l])))
-                self.feature_writer.write((
-                    ';\"%f\"' % (cs_table_ls[l][s]/max(cs_table_ls[l]))
-                    ).replace(".", ","))
-            self.feature_writer.write(';\"\"')
+            # relevance for sources of l
+            print('  - Relevance for sources = %f' % (relev_src[l]))
 
-            # source connectivity of l
-            print('  - Source connectivity = %f' % (src_connect[l]))
-            self.feature_writer.write((';\"%f\"' % (src_connect[l])
-                                       ).replace(".", ","))
+            if self.should_save_ft_logs:
+                # write all of the above in the feature log
+                self.feature_writer.write((';\"%f\"' % (relev_dst[l])
+                                           ).replace(".", ","))
+                self.feature_writer.write(';\"\"')
+                for d in range(l, self.layer_num_list[b]):
+                    self.feature_writer.write((
+                        ';\"%f\"' % (cs_table_ls[d][l]/max(
+                            fwd[l] for fwd in cs_table_ls if len(fwd) > l))
+                        ).replace(".", ","))
+                self.feature_writer.write(';\"\"')
+                for s in range(len(cs_table_ls[l])):
+                    self.feature_writer.write((
+                        ';\"%f\"' % (cs_table_ls[l][s]/max(cs_table_ls[l]))
+                        ).replace(".", ","))
+                self.feature_writer.write(';\"\"')
+                self.feature_writer.write((';\"%f\"' % (relev_src[l])
+                                           ).replace(".", ","))
 
     # -------------------------------------------------------------------------
     # ----------------------- PROCESSING FEATURE VALUES -----------------------
@@ -326,6 +331,7 @@ class DenseNet:
         """
         Get the list of connection strengths (CS) for all connections to a
         given filter layer.
+
         The CS of a connection is equal to the mean of its associated absolute
         kernel weights (sum divided by num of weights).
 
@@ -351,64 +357,133 @@ class DenseNet:
 
         return cs_list
 
-    def get_dst_connect(self, b, cs_table_ls, tresh_fraction=0.67):
+    def get_relev_dst(self, b, cs_table_ls, tresh_fract=0.67):
         """
-        Get the destination connectivity for all layers (filters) in a block.
-        The destination connectivity of a layer l expresses how many of the
-        connections sent from its predecessor l-1 are 'useful enough' at the
-        levels of its destination layers within the block.
+        Get the relevance for destinations for all layers (filters) in a block.
+        The relevance for destinations of a layer l expresses the portion of
+        the connections sent from l-1 that are 'relevant enough' for their
+        destination layers to receive information through them.
+
         For each connection from l-1 to a future layer d, add +1/n_connections
-        if the connection's CS is >= tresh_fraction * the max CS for d.
+        if the connection's CS is >= tresh_fract * the max CS out of all
+        connections received by d.
         N.B.: For l=0, the preceding l-1 is the output from the previous block.
 
         Args:
             b: `int`, identifier number for the block;
             cs_table_ls: `list` of `list` of `float`, the table of CS for each
                 connection to a layer l from a previous layer s;
-            tresh_fraction: `float`, the fraction of a layer's max CS that a CS
-                is compared to to be considered 'useful enough'.
+            tresh_fract: `float`, the fraction of a layer's max CS that a CS
+                is compared to to be considered 'relevant enough'.
         """
-        dst_connect = []
+        relev_dst = []
         max_cs = 0  # the max CS for each future layer
 
         for l in range(self.layer_num_list[b]):
-            dst_connect.append(0)
+            relev_dst.append(0)
             for d in range(l, self.layer_num_list[b]):
                 max_cs = max(cs_table_ls[d])
-                dst_connect[l] += int(cs_table_ls[d][l]/max_cs >= 0.67)
-            # normalised in order to make it a fraction
-            dst_connect[l] /= self.layer_num_list[b] - l
+                relev_dst[l] += int(cs_table_ls[d][l]/max_cs >= tresh_fract)
+            # normalised: 0 = no relevant connections, 1 = all relevant
+            relev_dst[l] /= self.layer_num_list[b] - l
 
-        return dst_connect
+        return relev_dst
 
-    def get_src_connect(self, b, cs_table_ls, tresh_fraction=0.67):
+    def get_relev_src(self, b, cs_table_ls, tresh_fract=0.67):
         """
-        Get the source connectivity for all layers (filters) in a block.
-        The source connectivity of a layer l expresses how many of the
-        connections recieved by l are 'useful enough' at the level of l.
+        Get the relevance for sources for all layers (filters) in a block.
+        The relevance for sources of a layer l expresses the portion of the
+        connections received by l that are 'relevant enough' for their source
+        layers to send information through them.
+
         For each connection from a past layer s-1 to l, add +1/n_connections
-        if the connection's CS is >= tresh_fraction * the max CS for s.
+        if the connection's CS is >= tresh_fract * the max CS out of all
+        connections sent from s-1.
         N.B.: For s=0, the preceding s-1 is the output from the previous block.
 
         Args:
             b: `int`, identifier number for the block;
             cs_table_ls: `list` of `list` of `float`, the table of CS for each
                 connection to a layer l from a previous layer s;
-            tresh_fraction: `float`, the fraction of a layer's max CS that a CS
-                is compared to to be considered 'useful enough'.
+            tresh_fract: `float`, the fraction of a layer's max CS that a CS
+                is compared to to be considered 'relevant enough'.
         """
-        src_connect = []
+        relev_src = []
         max_cs = 0  # the max CS for each past layer
 
         for l in range(self.layer_num_list[b]):
-            src_connect.append(0)
+            relev_src.append(0)
             for s in range(len(cs_table_ls[l])):
-                max_cs = max(fwd[s] for fwd in cs_table_ls if len(fwd) > s)
-                src_connect[l] += int(cs_table_ls[l][s]/max_cs >= 0.67)
-            # normalised in order to make it a fraction
-            src_connect[l] /= l+1
+                max_cs = max(fwd[s] for fwd in cs_table_ls[s:])
+                relev_src[l] += int(cs_table_ls[l][s]/max_cs >= tresh_fract)
+            # normalised: 0 = no relevant connections, 1 = all relevant
+            relev_src[l] /= l+1
 
-        return src_connect
+        return relev_src
+
+    def get_spread_emi(self, b, cs_table_ls, tresh_fract=0.67):
+        """
+        Get the spread of emission for all layers (filters) in a block.
+        The spread of emission of a layer l expresses the portion of the
+        connections sent from l-1 that are 'relevant enough' for l-1 to send
+        (emit) information through them.
+
+        For each connection from l-1 to a future layer d, add +1/n_connections
+        if the connection's CS is >= tresh_fract * the max CS out of all
+        connections sent from l-1.
+        N.B.: For l=0, the preceding l-1 is the output from the previous block.
+
+        Args:
+            b: `int`, identifier number for the block;
+            cs_table_ls: `list` of `list` of `float`, the table of CS for each
+                connection to a layer l from a previous layer s;
+            tresh_fract: `float`, the fraction of a layer's max CS that a CS
+                is compared to to be considered 'relevant enough'.
+        """
+        spread_emi = []
+        max_cs = 0  # the max CS for each future layer
+
+        for l in range(self.layer_num_list[b]):
+            spread_emi.append(0)
+            max_cs = max(fwd[l] for fwd in cs_table_ls[l:])
+            for d in range(l, self.layer_num_list[b]):
+                spread_emi[l] += int(cs_table_ls[d][l]/max_cs >= tresh_fract)
+            # normalised: 0 = no relevant connections, 1 = all relevant
+            spread_emi[l] /= self.layer_num_list[b] - l
+
+        return spread_emi
+
+    def get_spread_rec(self, b, cs_table_ls, tresh_fract=0.67):
+        """
+        Get the spread of reception for all layers (filters) in a block.
+        The spread of reception of a layer l expresses the portion of the
+        connections received by l that are 'relevant enough' for l to receive
+        information through them.
+
+        For each connection from a past layer s-1 to l, add +1/n_connections
+        if the connection's CS is >= tresh_fract * the max CS out of all
+        connections received by l.
+        N.B.: For s=0, the preceding s-1 is the output from the previous block.
+
+        Args:
+            b: `int`, identifier number for the block;
+            cs_table_ls: `list` of `list` of `float`, the table of CS for each
+                connection to a layer l from a previous layer s;
+            tresh_fract: `float`, the fraction of a layer's max CS that a CS
+                is compared to to be considered 'relevant enough'.
+        """
+        spread_rec = []
+        max_cs = 0  # the max CS for each past layer
+
+        for l in range(self.layer_num_list[b]):
+            spread_rec.append(0)
+            max_cs = max(cs_table_ls[l])
+            for s in range(len(cs_table_ls[l])):
+                spread_rec[l] += int(cs_table_ls[l][s]/max_cs >= tresh_fract)
+            # normalised: 0 = no relevant connections, 1 = all relevant
+            spread_rec[l] /= l+1
+
+        return spread_rec
 
     def process_filter(self, filter, block_num, filter_num, epoch):
         """
@@ -449,8 +524,8 @@ class DenseNet:
     def process_block_filters(self, b, epoch):
         """
         Process a given block's filters. Return values for features related to
-        the filters' kernel weights: connection strengths, destination
-        connectivities, and source connectivities.
+        the filters' kernel weights: connection strengths, relevances for
+        destinations, and relevances for sources.
 
         Args:
             b: `int`, identifier number for the block;
@@ -464,15 +539,23 @@ class DenseNet:
                 cs_table_ls.append(self.process_filter(
                     self.filter_ref_list[b+1][f], b, f, epoch))
 
-        # destination connectivity: among all the connections sent from
-        # a layer l-1, how many of them are useful at the destination?
-        dst_connect = self.get_dst_connect(b, cs_table_ls)
+        # relevance for destinations: what portion of all the connections sent
+        # from a layer l-1 are relevant for their destination layers?
+        relev_dst = self.get_relev_dst(b, cs_table_ls)
 
-        # source connectivity: among all the connections recieved by
-        # a layer l, how many of them are useful at the level of l?
-        src_connect = self.get_src_connect(b, cs_table_ls)
+        # relevance for sources: what portion of all the connections received
+        # by a layer l are relevant for their source layers?
+        relev_src = self.get_relev_src(b, cs_table_ls)
 
-        return(cs_table_ls, dst_connect, src_connect)
+        # spread of emission: what portion of all the connections sent
+        # from a layer l-1 are relevant for l-1?
+        # spread_emi = self.get_spread_emi(b, cs_table_ls)
+
+        # spread of emission: what portion of all the connections received
+        # by a layer l are relevant for l?
+        # spread_rec = self.get_spread_rec(b, cs_table_ls)
+
+        return(cs_table_ls, relev_dst, relev_src)
 
     # -------------------------------------------------------------------------
     # ---------------------- DEFINING INPUT PLACEHOLDERS ----------------------
@@ -537,7 +620,7 @@ class DenseNet:
 
     def batch_norm(self, _input):
         """
-        Performs batch normalization on a given input (_input).
+        Performs batch normalisation on a given input (_input).
 
         Args:
             _input: tensor, the operation's input.
@@ -620,8 +703,10 @@ class DenseNet:
 
     def composite_function(self, _input, out_features, kernel_size=3):
         """
-        Function H_l. Takes a concatenation of previous outputs and performs:
-        - batch normalization;
+        Composite function H_l([x_0, ..., x_l-1]) for a dense layer.
+
+        Takes a concatenation of previous outputs and performs:
+        - batch normalisation;
         - ReLU activation function;
         - 2d convolution, with required kernel size (side);
         - dropout, if required (training the graph and keep_prob not set to 1).
@@ -633,7 +718,7 @@ class DenseNet:
             kernel_size: `int`, size of the square kernels (their side).
         """
         with tf.variable_scope("composite_function"):
-            # batch normalization
+            # batch normalisation
             output = self.batch_norm(_input)
             # ReLU activation function
             output = tf.nn.relu(output)
@@ -646,9 +731,11 @@ class DenseNet:
 
     def bottleneck(self, _input, out_features):
         """
-        Bottleneck function, used before composite function H_l in DenseNet-BC,
-        takes a concatenation of previous outputs and performs:
-        - batch normalization,
+        Bottleneck function, used before the composite function H_l in the
+        dense layers of DenseNet-BC.
+
+        Takes a concatenation of previous outputs and performs:
+        - batch normalisation,
         - ReLU activation function,
         - 2d convolution, with kernel size 1 (produces 4x the features of H_l),
         - dropout, if required (training the graph and keep_prob not set to 1).
@@ -660,7 +747,7 @@ class DenseNet:
             kernel_size: `int`, size of the square kernels (their side).
         """
         with tf.variable_scope("bottleneck"):
-            # batch normalization
+            # batch normalisation
             output = self.batch_norm(_input)
             # ReLU activation function
             output = tf.nn.relu(output)
@@ -679,6 +766,7 @@ class DenseNet:
     def add_internal_layer(self, _input, layer, growth_rate):
         """
         Adds a new convolutional (dense) layer within a block.
+
         This layer will perform the composite function H_l([x_0, ..., x_l-1])
         to obtain its output x_l.
         It will then concatenate x_l with the layer's input: all the outputs of
@@ -751,6 +839,7 @@ class DenseNet:
         """
         Adds a new transition layer after a block. This layer's inputs are the
         concatenated feature maps of each layer in the block.
+
         The layer first runs the composite function with kernel size 1:
         - In DenseNet mode, it produces as many feature maps as the input had.
         - In DenseNet-BC mode, it produces reduction (theta) times as many,
@@ -778,8 +867,10 @@ class DenseNet:
     def transition_layer_to_classes(self, _input, block, layer):
         """
         Adds the transition layer after the last block. This layer outputs the
-        estimated probabilities by classes. It performs:
-        - batch normalization,
+        estimated probabilities by classes.
+
+        It performs:
+        - batch normalisation,
         - ReLU activation function,
         - wider-than-normal average pooling,
         - reshaping the output into a 1D tensor,
@@ -792,7 +883,7 @@ class DenseNet:
         """
         with tf.variable_scope("Transition_to_classes_block_%d_layer_%d" %
                                (block, layer)):
-            # batch normalization
+            # batch normalisation
             output = self.batch_norm(_input)
             # ReLU activation function
             output = tf.nn.relu(output)
@@ -934,8 +1025,7 @@ class DenseNet:
 
     def _build_graph(self):
         """
-        Gets the growth rate and the layers per block.
-        Then builds the graph and defines the operations for:
+        Builds the graph and defines the operations for:
         cross-entropy (also l2_loss and a momentum optimizer),
         training step (minimize momentum optimizer using l2_loss + cross-entr),
         accuracy (reduce mean).
@@ -1078,8 +1168,8 @@ class DenseNet:
             print('-' * 40 + "\nProcessing filters:")
             print('\n* Global input data (post-processed):')
             for b in range(0, self.total_blocks):
-                cs, d_cnct, s_cnct = self.process_block_filters(b, epoch)
-                self.ft_log_filters(b, cs, d_cnct, s_cnct)
+                cs, relev_d, relev_s = self.process_block_filters(b, epoch)
+                self.ft_log_filters(b, cs, relev_d, relev_s)
 
         print('-' * 40)
         if self.should_save_ft_logs:
@@ -1098,14 +1188,14 @@ class DenseNet:
         """
         continue_training = True
 
-        if epoch-epoch_last_block != 1 and epoch-epoch_last_block <= 300:
+        if epoch-epoch_last_block != 1:
             # if (epoch-1) % 20 == 0:
             #     self._new_block()
-            cs, d_cnct, s_cnct = self.process_block_filters(
+            cs, relev_d, relev_s = self.process_block_filters(
                 self.total_blocks-1, epoch)
             settled_layers = 0
-            for src in range(1, len(s_cnct)):
-                if s_cnct[src] == 1:
+            for src in range(1, len(relev_s)):
+                if relev_s[src] >= 1:
                     settled_layers += 1
 
             # stage #0 = ascension stage
@@ -1116,14 +1206,21 @@ class DenseNet:
                 elif (epoch-1) % self.asc_thresh == 0:
                     self._new_layer()
 
-            # stage #1 = improvement stage (currently does nothing)
-            # if self.algorithm_stage == 1:
-            #     if settled_layers > self.settled_layers_ceil:
-            #         self.settled_layers_ceil = settled_layers
+            # stage #1 = improvement stage
+            if self.algorithm_stage == 1:
+                if self.patience_countdown <= 0:
+                    continue_training = False
+                elif settled_layers > self.settled_layers_ceil:
+                    self.settled_layers_ceil = settled_layers
+                    self._new_layer()
+                    self.patience_countdown = self.patience_param
+                else:
+                    self.patience_countdown -= 1
 
         elif epoch-epoch_last_block == 1:
-            self.settled_layers_ceil = 0  # settled = layers with s_cnct == 1.
+            self.settled_layers_ceil = 0  # settled = layers with relev_s == 1.
             self.algorithm_stage = 0  # start with ascension stage.
+            self.patience_countdown = self.patience_param
 
         return continue_training
 
@@ -1225,8 +1322,8 @@ class DenseNet:
                     data only before training ('once_prior_train'), on every
                     epoch ('every_epoch') or not at all (None);
                 `bool`: used with SVHN, should we shuffle the data or not;
-            normalization: `str` or None;
-                None: don't use any normalization for pixels;
+            normalisation: `str` or None;
+                None: don't use any normalisation for pixels;
                 'divide_255': divide all pixels by 255;
                 'divide_256': divide all pixels by 256;
                 'by_chanels': substract the mean of the pixel's chanel and
@@ -1240,7 +1337,7 @@ class DenseNet:
         total_start_time = time.time()
 
         epoch = 1             # current training epoch
-        epoch_last_block = 0  # epoch at which the last block was added
+        epoch_last_b = 0  # epoch at which the last block was added
         while epoch < max_n_epochs + 1:
             # only print epoch name on certain epochs
             if (epoch-1) % self.ft_period == 0:
@@ -1258,6 +1355,7 @@ class DenseNet:
             print("Training...", end=' ')
             loss, acc = self.train_one_epoch(
                 self.data_provider.train, batch_size, learning_rate)
+            # save logs
             if self.should_save_logs:
                 self.log_loss_accuracy(loss, acc, epoch, prefix='train')
 
@@ -1266,18 +1364,17 @@ class DenseNet:
                 print("Validation...")
                 loss, acc = self.test(
                     self.data_provider.validation, batch_size)
+                # save logs
                 if self.should_save_logs:
                     self.log_loss_accuracy(loss[-1], acc, epoch,
                                            prefix='valid')
-
-            # on certain epochs print (and perhaps save) feature values
-            if (epoch-1) % self.ft_period == 0:
-                self.print_relevant_features(loss, acc, epoch)
-
-            # self-constructing step
-            if self.should_self_construct:
-                if not self.self_constructing_epoch(epoch, epoch_last_block):
-                    break
+                # save feature logs (on certain epochs)
+                if (epoch-1) % self.ft_period == 0:
+                    self.print_relevant_features(loss, acc, epoch)
+                # self-constructing step
+                if self.should_self_construct:
+                    if not self.self_constructing_epoch(epoch, epoch_last_b):
+                        break
 
             # measure training time for this epoch
             time_per_epoch = time.time() - start_time

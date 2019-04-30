@@ -11,10 +11,10 @@ train_params_cifar = {
     'batch_size': 64,
     'max_n_epochs': 300,  # default was 300
     'initial_learning_rate': 0.1,
-    'reduce_lr_epoch_1': 20,  # epochs * 0.5, default was 150
-    'reduce_lr_epoch_2': 30,  # epochs * 0.75, default was 225
+    'reduce_lr_epoch_1': 150,  # epochs * 0.5, default was 150
+    'reduce_lr_epoch_2': 225,  # epochs * 0.75, default was 225
     'validation_set': True,
-    'validation_split': None,  # None or float
+    'validation_split': 0.1,  # None or float
     'shuffle': 'every_epoch',  # None, once_prior_train, every_epoch
     'normalization': 'by_chanels',  # None, divide_256, divide_255, by_chanels
 }
@@ -102,7 +102,14 @@ if __name__ == '__main__':
         '--ascension_threshold', '--asc_thresh', '-at',
         dest='asc_thresh', type=int, default=10,
         help='Ascension threshold, for the self-constructing algorithm:'
-             ' number of epochs before adding a new layer.')
+             ' number of epochs before adding a new layer during the'
+             ' ascension stage, until a layer settles.')
+    parser.add_argument(
+        '--patience_parameter', '--patience_param', '-pp',
+        dest='patience_param', type=int, default=200,
+        help='Patience parameter, for the self-constructing algorithm:'
+             ' number of epochs to wait before stopping the improvement'
+             ' stage, unless a new layer settles.')
 
     # Wether or not to write TensorFlow logs.
     parser.add_argument(
@@ -128,26 +135,26 @@ if __name__ == '__main__':
         dest='ft_period', type=int, default=1,
         help='Number of epochs between each measurement of feature values.')
 
-    # Wether or not to write certain feature values in feature logs.
+    # Wether or not to calculate certain feature values (saved in ft-logs).
     parser.add_argument(
         '--feature-filters', '--ft-filters',
         dest='ft_filters', action='store_true',
-        help='Write feature values from convolution filters'
+        help='Calculate feature values from convolution filters'
              ' (e.g. the mean and std of a filter\'s kernel weights).')
     parser.add_argument(
         '--no-feature-filters', '--no-ft-filters',
         dest='ft_filters', action='store_false',
-        help='Do not write feature values from filters.')
+        help='Do not calculate feature values from filters.')
     parser.set_defaults(ft_filters=True)
     parser.add_argument(
         '--feature-cross-entropies', '--ft-cross-entropies', '--ft-cr-entr',
         dest='ft_cross_entropies', action='store_true',
-        help='Measure and write cross-entropy values'
+        help='Calculate cross-entropy values'
              ' corresponding to all layers in the last block.')
     parser.add_argument(
         '--no-feature-cross-entropies', '--no-ft-cross-entropies',
         '--no-ft-cr-entr', dest='ft_cross_entropies', action='store_false',
-        help='Do not measure and write cross-entropy values'
+        help='Do not calculate cross-entropy values'
              ' (only the real cross-entropy).')
     parser.set_defaults(ft_cross_entropies=False)
 
@@ -231,4 +238,5 @@ if __name__ == '__main__':
         print("Data provider test images: ", data_provider.test.num_examples)
         print("Testing...")
         loss, accuracy = model.test(data_provider.test, batch_size=200)
-        print("mean cross_entropy: %f, mean accuracy: %f" % (loss, accuracy))
+        model.print_relevant_features(loss, accuracy, -1)
+        print("mean cross_entropy: %f, mean accuracy: %f" % (loss[-1], accuracy))
