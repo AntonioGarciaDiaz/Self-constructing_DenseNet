@@ -20,7 +20,8 @@ class DenseNet:
     def __init__(self, data_provider, growth_rate, layer_num_list,
                  keep_prob, num_inter_threads, num_intra_threads,
                  weight_decay, nesterov_momentum, model_type, dataset,
-                 should_self_construct, asc_thresh, patience_param,
+                 should_self_construct, should_change_lr,
+                 layer_cs, asc_thresh, patience_param,
                  should_save_logs, should_save_ft_logs, ft_period,
                  ft_filters, ft_cross_entropies,
                  should_save_model, should_save_images,
@@ -45,6 +46,9 @@ class DenseNet:
                 should we use bottleneck layers and compression or not;
             dataset: `str`, dataset name;
             should_self_construct: `bool`, should use self-constructing or not;
+            should_change_lr: `bool`, should change the learning rate or not;
+            layer_cs: `str`, 'layer CS', preferred interpretation of CS values
+                when evaluating layers (using 'relevance' or 'spread');
             asc_thresh: `int`, ascension threshold for self-constructing;
             patience_param: `int`, patience parameter for self-constructing;
             should_save_logs: `bool`, should tensorflow logs be saved or not;
@@ -98,7 +102,10 @@ class DenseNet:
         self.nesterov_momentum = nesterov_momentum
         self.model_type = model_type
         self.dataset_name = dataset
+
         self.should_self_construct = should_self_construct
+        self.should_change_lr = should_change_lr
+        self.layer_cs = layer_cs
         self.asc_thresh = asc_thresh
         self.patience_param = patience_param
         self.patience_countdown = patience_param
@@ -271,25 +278,26 @@ class DenseNet:
         ])
         self.summary_writer.add_summary(summary, epoch)
 
-    def ft_log_filters(self, b, cs_table_ls, relev_dst, relev_src):
+    def ft_log_filters(self, b, cs_table_ls, lcs_dst, lcs_src):
         """
         Write a feature log with data concerning filters: the CS of every
-        connection in a given block, the relevance for destinations and sources
-        for all layers in the same block.
+        connection in a given block, the 'layer CS' (relevance or spread) for
+        destinations and sources for all layers in the same block.
 
         Args:
             b: `int`, identifier number for the block;
             cs_table_ls: `list` of `list` of `float`, the table of CS for each
                 connection to a layer l from a previous layer s;
-            relev_dst: `list` of `float`, relevance for destinations
+            lcs_dst: `list` of `float`, 'layer CS' for destinations
                 for all layers in the block;
-            relev_src: `list` of `float`, relevance for sources
+            lcs_src: `list` of `float`, 'layer CS' for sources
                 for all layers in the block.
         """
         # printing and saving the data to feature logs
         for l in range(self.layer_num_list[b]):
-            # relevance for destinations of l-1
-            print('  - Relevance for destinations = %f' % (relev_dst[l]))
+            # 'layer CS' for destinations of l-1
+            print('  - %s for destinations = %f' % (
+                self.layer_cs.capitalize(), lcs_dst[l]))
             # destination layer normalised CS (sent from l-1 towards d)
             for d in range(l, self.layer_num_list[b]):
                 print('  - Towards layer %d: normalised CS = %f' % (
@@ -301,12 +309,13 @@ class DenseNet:
             for s in range(len(cs_table_ls[l])):
                 print('  - From layer %d: normalised CS = %f' % (
                     s, cs_table_ls[l][s]/max(cs_table_ls[l])))
-            # relevance for sources of l
-            print('  - Relevance for sources = %f' % (relev_src[l]))
+            # 'layer CS' for sources of l
+            print('  - %s for sources = %f' % (
+                self.layer_cs.capitalize(), lcs_src[l]))
 
             if self.should_save_ft_logs:
                 # write all of the above in the feature log
-                self.feature_writer.write((';\"%f\"' % (relev_dst[l])
+                self.feature_writer.write((';\"%f\"' % (lcs_dst[l])
                                            ).replace(".", ","))
                 self.feature_writer.write(';\"\"')
                 for d in range(l, self.layer_num_list[b]):
@@ -320,7 +329,7 @@ class DenseNet:
                         ';\"%f\"' % (cs_table_ls[l][s]/max(cs_table_ls[l]))
                         ).replace(".", ","))
                 self.feature_writer.write(';\"\"')
-                self.feature_writer.write((';\"%f\"' % (relev_src[l])
+                self.feature_writer.write((';\"%f\"' % (lcs_src[l])
                                            ).replace(".", ","))
 
     # -------------------------------------------------------------------------
@@ -524,8 +533,9 @@ class DenseNet:
     def process_block_filters(self, b, epoch):
         """
         Process a given block's filters. Return values for features related to
-        the filters' kernel weights: connection strengths, relevances for
-        destinations, and relevances for sources.
+        the filters' kernel weights: connection strengths, 'layer CS' for
+        destinations, and 'layer CS' for sources. The 'layer CS' can be either
+        relevance or spread, depending on what is required by the algorithm.
 
         Args:
             b: `int`, identifier number for the block;
@@ -539,23 +549,27 @@ class DenseNet:
                 cs_table_ls.append(self.process_filter(
                     self.filter_ref_list[b+1][f], b, f, epoch))
 
-        # relevance for destinations: what portion of all the connections sent
-        # from a layer l-1 are relevant for their destination layers?
-        relev_dst = self.get_relev_dst(b, cs_table_ls)
+        # if the required 'layer CS' is relevance
+        if self.layer_cs == 'relevance':
+            # relevance for destinations: what portion of all the connections
+            # sent from a layer l-1 are relevant for their destination layers?
+            lcs_dst = self.get_relev_dst(b, cs_table_ls)
 
-        # relevance for sources: what portion of all the connections received
-        # by a layer l are relevant for their source layers?
-        relev_src = self.get_relev_src(b, cs_table_ls)
+            # relevance for sources: what portion of all the connections
+            # received by a layer l are relevant for their source layers?
+            lcs_src = self.get_relev_src(b, cs_table_ls)
 
-        # spread of emission: what portion of all the connections sent
-        # from a layer l-1 are relevant for l-1?
-        # spread_emi = self.get_spread_emi(b, cs_table_ls)
+        # else (if the required 'layer CS' is spread)
+        else:
+            # spread of emission (for destinations): what portion of all the
+            # connections sent from a layer l-1 are relevant for l-1?
+            lcs_dst = self.get_spread_emi(b, cs_table_ls)
 
-        # spread of emission: what portion of all the connections received
-        # by a layer l are relevant for l?
-        # spread_rec = self.get_spread_rec(b, cs_table_ls)
+            # spread of reception (for sources): what portion of all the
+            # connections received by a layer l are relevant for l?
+            lcs_src = self.get_spread_rec(b, cs_table_ls)
 
-        return(cs_table_ls, relev_dst, relev_src)
+        return(cs_table_ls, lcs_dst, lcs_src)
 
     # -------------------------------------------------------------------------
     # ---------------------- DEFINING INPUT PLACEHOLDERS ----------------------
@@ -823,7 +837,7 @@ class DenseNet:
             for layer in range(layers_in_block):
                 output = self.add_internal_layer(output, layer, growth_rate)
 
-                if is_last and self.ft_cross_entropies:
+                if self.ft_cross_entropies and is_last:
                     # Save the cross-entropy for all layers except the last one
                     # (it is always saved as part of the end-graph operations)
                     if layer != layers_in_block-1:
@@ -1135,32 +1149,51 @@ class DenseNet:
     # -------------------- TRAINING AND TESTING THE MODEL ---------------------
     # -------------------------------------------------------------------------
 
-    def print_relevant_features(self, loss, accuracy, epoch):
+    def print_pertinent_features(self, loss, accuracy, epoch, validation_set):
         """
-        Prints on console the current values of relevant features.
+        Prints on console the current values of pertinent features.
+        The loss and accuracy are those on the validation set if such a set is
+        being used, otherwise they are those on the training set.
         If feature logs are being saved, this function saves feature values.
         If images are being saved, it also saves filter features as images.
 
         Args:
-            loss: `list` of `float`, validation set loss (cross_entropy) for
-                this epoch, corresponding to each internal layer of the graph;
-            accuracy: `float`, validation set accuracy for this epoch;
-            epoch: `int`, current training epoch.
+            loss: `list` of `float` (if validation_set == True, else `float`),
+                loss (cross_entropy) for this epoch, in some cases (as `list`
+                of `float`) contains several loss values, each corresponding to
+                each internal layer of the last block;
+            accuracy: `float`, accuracy for this epoch;
+            epoch: `int`, current training epoch;
+            validation_set: `bool`, wether a validation set is used or not.
         """
-        # print the current accuracy and the cross-entropy for each layer
-        print("Current validation accuracy = %f" % accuracy)
-        print("Cross-entropy per layer in block #%d:" % (
-            self.total_blocks-1))
-        for l in range(len(loss)):
-            print("* Layer #%d: cross-entropy = %f" % (l, loss[l]))
+        if validation_set:
+            # print the current validation accuracy
+            print("Current validation accuracy = %f" % accuracy)
+            # if calculating them, print a cross-entropy value for each layer
+            if self.ft_cross_entropies:
+                print("Validation cross-entropy per layer in block #%d:" % (
+                    self.total_blocks-1))
+                for l in range(len(loss)):
+                    print("* Layer #%d: cross-entropy = %f" % (l, loss[l]))
+            # else print only the current validation cross-entropy
+            else:
+                print("Current validation cross-entropy = %f" % loss[-1])
+        else:
+            # print the current training accuracy
+            print("Current training accuracy = %f" % accuracy)
+            # print the current training cross-entropy
+            print("Current training cross-entropy = %f" % loss)
 
         if self.should_save_ft_logs:
             # save the previously printed feature values
             self.feature_writer.write(("\"Epoch %d\";\"%f\";" % (
                 epoch, accuracy)).replace(".", ","))
-            for l in range(len(loss)):
-                self.feature_writer.write(("\"%f\";" % loss[l]
-                                           ).replace(".", ","))
+            if validation_set:
+                for l in range(len(loss)):
+                    self.feature_writer.write(("\"%f\";" % loss[l]
+                                               ).replace(".", ","))
+            else:
+                self.feature_writer.write(("\"%f\";" % loss).replace(".", ","))
             self.feature_writer.write('\"\"')
 
         if self.ft_filters:
@@ -1168,59 +1201,56 @@ class DenseNet:
             print('-' * 40 + "\nProcessing filters:")
             print('\n* Global input data (post-processed):')
             for b in range(0, self.total_blocks):
-                cs, relev_d, relev_s = self.process_block_filters(b, epoch)
-                self.ft_log_filters(b, cs, relev_d, relev_s)
+                cs, lcs_dst, lcs_src = self.process_block_filters(b, epoch)
+                self.ft_log_filters(b, cs, lcs_dst, lcs_src)
 
         print('-' * 40)
         if self.should_save_ft_logs:
             self.feature_writer.write('\n')
 
-    def self_constructing_epoch(self, epoch, epoch_last_block):
+    def self_constructing_step(self, epoch):
         """
-        The self-constructing step for one training epoch. Adds new layers
-        and/or blocks depending on parameters.
+        A step of the self-constructing algorithm for one training epoch.
+        Adds new layers and/or blocks depending on parameters.
         Returns True if training should continue, False otherwise.
+
+        This algorithm consists in a succession of two stages:
+        - Ascension: add one layer every asc_thresh training epochs, break the
+          loop when a layer settles (its layer cs for sources is == 1).
+        - Improvement: countdown of patience_param epochs until the stage ends,
+          if another layer settles, add a layer and restart the countdown.
 
         Args:
             epoch: `int`, current training epoch;
-            epoch_last_block: `int`, training epoch at which the last block was
-                added to the architecture.
         """
         continue_training = True
+        cs, lcs_dst, lcs_src = self.process_block_filters(
+            self.total_blocks-1, epoch)
 
-        if epoch-epoch_last_block != 1:
-            # if (epoch-1) % 20 == 0:
-            #     self._new_block()
-            cs, relev_d, relev_s = self.process_block_filters(
-                self.total_blocks-1, epoch)
-            settled_layers = 0
-            for src in range(1, len(relev_s)):
-                if relev_s[src] >= 1:
-                    settled_layers += 1
+        # calculate number of settled layers (layers with lcs_src == 1)
+        settled_layers = 0
+        for src in range(1, len(lcs_src)):
+            if lcs_src[src] >= 1:
+                settled_layers += 1
 
-            # stage #0 = ascension stage
-            if self.algorithm_stage == 0:
-                if settled_layers > 0:
-                    self.settled_layers_ceil = settled_layers
-                    self.algorithm_stage += 1
-                elif (epoch-1) % self.asc_thresh == 0:
-                    self._new_layer()
+        # stage #0 = ascension stage
+        if self.algorithm_stage == 0:
+            if settled_layers > 0:
+                self.settled_layers_ceil = settled_layers
+                self.algorithm_stage += 1
+            elif (epoch-1) % self.asc_thresh == 0:
+                self._new_layer()
 
-            # stage #1 = improvement stage
-            if self.algorithm_stage == 1:
-                if self.patience_countdown <= 0:
-                    continue_training = False
-                elif settled_layers > self.settled_layers_ceil:
-                    self.settled_layers_ceil = settled_layers
-                    self._new_layer()
-                    self.patience_countdown = self.patience_param
-                else:
-                    self.patience_countdown -= 1
-
-        elif epoch-epoch_last_block == 1:
-            self.settled_layers_ceil = 0  # settled = layers with relev_s == 1.
-            self.algorithm_stage = 0  # start with ascension stage.
-            self.patience_countdown = self.patience_param
+        # stage #1 = improvement stage
+        if self.algorithm_stage == 1:
+            if self.patience_countdown <= 0:
+                continue_training = False
+            elif settled_layers > self.settled_layers_ceil:
+                self.settled_layers_ceil = settled_layers
+                self._new_layer()
+                self.patience_countdown = self.patience_param
+            else:
+                self.patience_countdown -= 1
 
         return continue_training
 
@@ -1334,21 +1364,22 @@ class DenseNet:
         batch_size = train_params['batch_size']
         reduce_lr_epoch_1 = train_params['reduce_lr_epoch_1']
         reduce_lr_epoch_2 = train_params['reduce_lr_epoch_2']
+        validation_set = train_params.get('validation_set', False)
         total_start_time = time.time()
 
-        epoch = 1             # current training epoch
+        epoch = 1         # current training epoch
         epoch_last_b = 0  # epoch at which the last block was added
-        while epoch < max_n_epochs + 1:
+        while True:
             # only print epoch name on certain epochs
             if (epoch-1) % self.ft_period == 0:
                 print('\n', '-'*30, "Train epoch: %d" % epoch, '-'*30, '\n')
             start_time = time.time()
 
-            # learning rate only decreases when not self-constructing
-            if not self.should_self_construct:
+            # if not self-constructing, may reduce learning rate at some epochs
+            if not self.should_self_construct and self.should_change_lr:
                 if epoch == reduce_lr_epoch_1 or epoch == reduce_lr_epoch_2:
                     learning_rate = learning_rate / 10
-                    print("Decrease learning rate, new lr = %f" %
+                    print("Learning rate has been divided by 10, new lr = %f" %
                           learning_rate)
 
             # training step for one epoch
@@ -1360,7 +1391,7 @@ class DenseNet:
                 self.log_loss_accuracy(loss, acc, epoch, prefix='train')
 
             # validation step after the epoch
-            if train_params.get('validation_set', False):
+            if validation_set:
                 print("Validation...")
                 loss, acc = self.test(
                     self.data_provider.validation, batch_size)
@@ -1368,13 +1399,21 @@ class DenseNet:
                 if self.should_save_logs:
                     self.log_loss_accuracy(loss[-1], acc, epoch,
                                            prefix='valid')
-                # save feature logs (on certain epochs)
-                if (epoch-1) % self.ft_period == 0:
-                    self.print_relevant_features(loss, acc, epoch)
-                # self-constructing step
-                if self.should_self_construct:
-                    if not self.self_constructing_epoch(epoch, epoch_last_b):
+
+            # save feature logs (on certain epochs)
+            if (epoch-1) % self.ft_period == 0:
+                self.print_pertinent_features(loss, acc, epoch, validation_set)
+
+            # step of the self-constructing algorithm
+            if self.should_self_construct:
+                if epoch - epoch_last_b != 1:
+                    if not self.self_constructing_step(epoch):
                         break
+                # if this is a new block, reset the algorithm's variables
+                else:
+                    self.settled_layers_ceil = 0  # highest num of settled lay
+                    self.algorithm_stage = 0  # start with ascension stage
+                    self.patience_countdown = self.patience_param
 
             # measure training time for this epoch
             time_per_epoch = time.time() - start_time
@@ -1383,9 +1422,14 @@ class DenseNet:
                 str(timedelta(seconds=time_per_epoch)),
                 str(timedelta(seconds=seconds_left))))
 
+            # save model if required
             if self.should_save_model:
                 self.save_model()
+
+            # increase epoch, break at max_n_epochs if not self-constructing
             epoch += 1
+            if not self.should_self_construct and epoch >= max_n_epochs + 1:
+                break
 
         # measure total training time
         total_training_time = time.time() - total_start_time

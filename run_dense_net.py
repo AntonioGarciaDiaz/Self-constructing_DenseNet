@@ -88,7 +88,7 @@ if __name__ == '__main__':
         '--reduction', '-red', '-theta', type=float, default=0.5, metavar='',
         help='Reduction (theta) at transition layer, for DenseNets-BC models.')
 
-    # Wether the self-constructing algorithm is applied or not.
+    # What kind of algorithm (self-constructing, training, etc.) to apply.
     parser.add_argument(
         '--self-construct', dest='should_self_construct', action='store_true',
         help='Apply a self-constructing algorithm for modifying'
@@ -96,8 +96,31 @@ if __name__ == '__main__':
     parser.add_argument(
         '--no-self-construct', dest='should_self_construct',
         action='store_false',
-        help='Do not apply a self-constructing algorithm.')
+        help='Do not apply a self-constructing algorithm, only train.')
     parser.set_defaults(should_self_construct=True)
+    parser.add_argument(
+        '--change-learning-rate', '--change-lr',
+        dest='should_change_lr', action='store_true',
+        help='Allow any changes in the learning rate as defined in the'
+             ' training algorithm. When not self-constructing, the learning'
+             ' rate is divided by 10 at specific epochs, specified in the'
+             ' training parameters for the dataset in use.')
+    parser.add_argument(
+        '--no-change-learning-rate', '--no-change-lr',
+        dest='should_change_lr', action='store_false',
+        help='Do not allow any changes in the learning rate, regardless of the'
+             ' training algorithm.')
+    parser.set_defaults(should_change_lr=True)
+
+    # Parameters that define the self-constructing algorithm.
+    parser.add_argument(
+        '--layer_connection_strength', '--layer_cs', '-lcs', dest='layer_cs',
+        type=str, choices=['relevance', 'spread'], default='relevance',
+        help='Choice on \'layer CS\', how to interpret connection strength'
+             ' (CS) data when evaluating layers in the algorithm.'
+             ' Relevance (default) evaluates a given layer\'s connections from'
+             ' the perspective of other layers. Spread evaluates them from the'
+             ' perspective of that given layer.')
     parser.add_argument(
         '--ascension_threshold', '--asc_thresh', '-at',
         dest='asc_thresh', type=int, default=10,
@@ -238,5 +261,6 @@ if __name__ == '__main__':
         print("Data provider test images: ", data_provider.test.num_examples)
         print("Testing...")
         loss, accuracy = model.test(data_provider.test, batch_size=200)
-        model.print_relevant_features(loss, accuracy, -1)
-        print("mean cross_entropy: %f, mean accuracy: %f" % (loss[-1], accuracy))
+        model.print_pertinent_features(loss, accuracy, -1)
+        print("mean cross_entropy: %f, mean accuracy: %f" % (
+            loss[-1], accuracy))

@@ -48,20 +48,20 @@ Each model can be tested on the following datasets:
 
 **Example runs:**
 
-    ``python run_dense_net.py --train --test -m 'DenseNet-BC' --dataset=C10 --self-construct -at 10 -pp 200``
+``python run_dense_net.py --train --test -m 'DenseNet-BC' --dataset=C10 --self-construct -at 10 -pp 200``
 
-    Here the program uses the algorithm to self-construct a DenseNet-BC trained on the Cifar10 dataset, and then tests it.
-    The ``ascension_threshold`` is set to 10, and the ``patience_parameter`` is set to 200.
+Here the program uses the algorithm to self-construct a DenseNet-BC trained on the Cifar10 dataset, and then tests it.
+The ``ascension_threshold`` is set to 10, and the ``patience_parameter`` is set to 200.
 
-    ``python run_dense_net.py --train --test -m 'DenseNet' --dataset=SVHN --no-self-construct -lnl '12,12,12'``
+``python run_dense_net.py --train --test -m 'DenseNet' --dataset=SVHN --no-self-construct -lnl '12,12,12'``
 
-    Here the program trains a prebuilt DenseNet on the SVHN dataset, and then tests it.
-    It does not run the self-constructing algorithm on it.
-    The prebuilt DenseNet has got 3 dense blocks, with 12 layers in each block.
+Here the program trains a prebuilt DenseNet on the SVHN dataset, and then tests it.
+It does not run the self-constructing algorithm on it.
+The prebuilt DenseNet has got 3 dense blocks, with 12 layers in each block.
 
 **List all available options:**
 
-    ``python run_dense_net.py --help``
+``python run_dense_net.py --help``
 
 **N.B.:** It is possible to specify (like in the second example run) a prebuilt initial structure on which the algorithm runs (different than one block with one layer).
 A shell argument called ``layer_num_list`` (or ``lnl``) is used for defining the prebuilt blocks with their number of layers.
