@@ -67,7 +67,7 @@ The ``ascension_threshold`` is set to 10, and the ``patience_parameter`` is set 
 
 Here the program uses the self-constructing algorithm (variant #1) to build a DenseNet-BC trained on the Cifar10 dataset, with data augmentation.
 The resulting self-constructed network is then tested.
-The ``ascension_threshold`` is set to 10, and the ``patience_parameter`` is set to 200.
+The ``ascension_threshold`` is set to 20, and the ``patience_parameter`` is set to 100.
 
 ``python run_dense_net.py --train --test -m 'DenseNet' --dataset=SVHN --no-self-construct -lnl '12,12,12'``
 
