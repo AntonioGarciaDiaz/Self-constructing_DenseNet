@@ -21,7 +21,7 @@ class DenseNet:
                  keep_prob, num_inter_threads, num_intra_threads,
                  weight_decay, nesterov_momentum, model_type, dataset,
                  should_self_construct, should_change_lr,
-                 layer_cs, asc_thresh, patience_param,
+                 self_constructing_var, layer_cs, asc_thresh, patience_param,
                  should_save_logs, should_save_ft_logs, ft_period,
                  ft_filters, ft_cross_entropies,
                  should_save_model, should_save_images,
@@ -47,6 +47,9 @@ class DenseNet:
             dataset: `str`, dataset name;
             should_self_construct: `bool`, should use self-constructing or not;
             should_change_lr: `bool`, should change the learning rate or not;
+            self_constructing_var: `int`, variant of the self-constructing
+                algorithm to be used, if the int does not identify any variant
+                the most recent (default) variant is used;
             layer_cs: `str`, 'layer CS', preferred interpretation of CS values
                 when evaluating layers (using 'relevance' or 'spread');
             asc_thresh: `int`, ascension threshold for self-constructing;
@@ -105,6 +108,15 @@ class DenseNet:
 
         self.should_self_construct = should_self_construct
         self.should_change_lr = should_change_lr
+
+        # Choice of the self-constructing algorithm variant.
+        if self_constructing_var == 0:
+            self.self_constructing_step = self.self_constructing_var0
+        elif self_constructing_var == 1:
+            self.self_constructing_step = self.self_constructing_var1
+        else:
+            self.self_constructing_step = self.self_constructing_var2
+
         self.layer_cs = layer_cs
         self.asc_thresh = asc_thresh
         self.patience_param = patience_param
@@ -1166,23 +1178,20 @@ class DenseNet:
             epoch: `int`, current training epoch;
             validation_set: `bool`, wether a validation set is used or not.
         """
+        # print the current accuracy
+        print("Current accuracy = %f" % accuracy)
         if validation_set:
-            # print the current validation accuracy
-            print("Current validation accuracy = %f" % accuracy)
-            # if calculating them, print a cross-entropy value for each layer
+            # print a cross-entropy value for each layer, if calculating them
             if self.ft_cross_entropies:
-                print("Validation cross-entropy per layer in block #%d:" % (
+                print("Cross-entropy per layer in block #%d:" % (
                     self.total_blocks-1))
                 for l in range(len(loss)):
                     print("* Layer #%d: cross-entropy = %f" % (l, loss[l]))
             # else print only the current validation cross-entropy
             else:
-                print("Current validation cross-entropy = %f" % loss[-1])
+                print("Current cross-entropy = %f" % loss[-1])
         else:
-            # print the current training accuracy
-            print("Current training accuracy = %f" % accuracy)
-            # print the current training cross-entropy
-            print("Current training cross-entropy = %f" % loss)
+            print("Current cross-entropy = %f" % loss)
 
         if self.should_save_ft_logs:
             # save the previously printed feature values
@@ -1208,10 +1217,96 @@ class DenseNet:
         if self.should_save_ft_logs:
             self.feature_writer.write('\n')
 
-    def self_constructing_step(self, epoch):
+    def self_constructing_var0(self, epoch):
         """
-        A step of the self-constructing algorithm for one training epoch.
-        Adds new layers and/or blocks depending on parameters.
+        A step of the self-constructing algorithm (variant #0) for one
+        training epoch.
+        Adds new layers to the last block depending on parameters.
+        Returns True if training should continue, False otherwise.
+
+        This algorithm consists in a succession of two stages:
+        - Ascension: add one layer every asc_thresh training epochs, break the
+          loop when a layer settles (its layer cs for sources is == 1).
+        - Improvement: end the stage when a total of max_n_epochs epochs have
+          elapsed (since the addition of the last block).
+
+        Args:
+            epoch: `int`, current training epoch (since adding the last block).
+        """
+        continue_training = True
+        cs, lcs_dst, lcs_src = self.process_block_filters(
+            self.total_blocks-1, epoch)
+
+        # calculate number of settled layers (layers with lcs_src == 1)
+        settled_layers = 0
+        for src in range(1, len(lcs_src)):
+            if lcs_src[src] >= 1:
+                settled_layers += 1
+
+        # stage #0 = ascension stage
+        if self.algorithm_stage == 0:
+            if settled_layers > 0:
+                self.algorithm_stage += 1
+            elif (epoch-1) % self.asc_thresh == 0:
+                self._new_layer()
+
+        # stage #1 = improvement stage
+        if self.algorithm_stage == 1:
+            if epoch >= self.max_n_epochs:
+                continue_training = False
+
+        return continue_training
+
+    def self_constructing_var1(self, epoch):
+        """
+        A step of the self-constructing algorithm (variant #1) for one
+        training epoch.
+        Adds new layers to the last block depending on parameters.
+        Returns True if training should continue, False otherwise.
+
+        This algorithm consists in a succession of two stages:
+        - Ascension: add one layer every asc_thresh training epochs, break the
+          loop when a layer settles (its layer cs for sources is == 1).
+        - Improvement: end the stage when a total of max_n_epochs epochs have
+          elapsed (since the addition of the last block),
+          if another layer settles, add a layer and restart the countdown.
+
+        Args:
+            epoch: `int`, current training epoch (since adding the last block).
+        """
+        continue_training = True
+        cs, lcs_dst, lcs_src = self.process_block_filters(
+            self.total_blocks-1, epoch)
+
+        # calculate number of settled layers (layers with lcs_src == 1)
+        settled_layers = 0
+        for src in range(1, len(lcs_src)):
+            if lcs_src[src] >= 1:
+                settled_layers += 1
+
+        # stage #0 = ascension stage
+        if self.algorithm_stage == 0:
+            if settled_layers > 0:
+                self.settled_layers_ceil = settled_layers
+                self.algorithm_stage += 1
+            elif (epoch-1) % self.asc_thresh == 0:
+                self._new_layer()
+
+        # stage #1 = improvement stage
+        if self.algorithm_stage == 1:
+            if epoch >= self.max_n_epochs:
+                continue_training = False
+            elif settled_layers > self.settled_layers_ceil:
+                self.settled_layers_ceil = settled_layers
+                self._new_layer()
+
+        return continue_training
+
+    def self_constructing_var2(self, epoch):
+        """
+        A step of the self-constructing algorithm (variant #2) for one
+        training epoch.
+        Adds new layers to the last block depending on parameters.
         Returns True if training should continue, False otherwise.
 
         This algorithm consists in a succession of two stages:
@@ -1221,7 +1316,7 @@ class DenseNet:
           if another layer settles, add a layer and restart the countdown.
 
         Args:
-            epoch: `int`, current training epoch;
+            epoch: `int`, current training epoch (since adding the last block).
         """
         continue_training = True
         cs, lcs_dst, lcs_src = self.process_block_filters(
@@ -1359,7 +1454,7 @@ class DenseNet:
                 'by_chanels': substract the mean of the pixel's chanel and
                     divide the result by the channel's standard deviation.
         """
-        max_n_epochs = train_params['max_n_epochs']
+        self.max_n_epochs = train_params['max_n_epochs']
         learning_rate = train_params['initial_learning_rate']
         batch_size = train_params['batch_size']
         reduce_lr_epoch_1 = train_params['reduce_lr_epoch_1']
@@ -1404,10 +1499,15 @@ class DenseNet:
             if (epoch-1) % self.ft_period == 0:
                 self.print_pertinent_features(loss, acc, epoch, validation_set)
 
+            # save model if required
+            if self.should_save_model:
+                self.save_model()
+
             # step of the self-constructing algorithm
             if self.should_self_construct:
                 if epoch - epoch_last_b != 1:
-                    if not self.self_constructing_step(epoch):
+                    # can break here if self-constructing algorithm is over
+                    if not self.self_constructing_step(epoch - epoch_last_b):
                         break
                 # if this is a new block, reset the algorithm's variables
                 else:
@@ -1417,18 +1517,15 @@ class DenseNet:
 
             # measure training time for this epoch
             time_per_epoch = time.time() - start_time
-            seconds_left = int((max_n_epochs - epoch) * time_per_epoch)
-            print("Time per epoch: %s, Est. complete in: %s" % (
+            seconds_left = int((self.max_n_epochs - epoch) * time_per_epoch)
+            print("Time per epoch: %s, Est. complete (%d epochs) in: %s" % (
                 str(timedelta(seconds=time_per_epoch)),
+                self.max_n_epochs,
                 str(timedelta(seconds=seconds_left))))
-
-            # save model if required
-            if self.should_save_model:
-                self.save_model()
 
             # increase epoch, break at max_n_epochs if not self-constructing
             epoch += 1
-            if not self.should_self_construct and epoch >= max_n_epochs + 1:
+            if not self.should_self_construct and epoch >= self.max_n_epochs+1:
                 break
 
         # measure total training time

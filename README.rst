@@ -11,14 +11,14 @@ The algorithm is based on the evolution of two features, which are here called "
 
 The **connection strength** (CS) of a layer :math:`l` with a previous layer :math:`s` (between the previous block's output and :math:`l-1`)
 is the mean of the absolute kernel weights associated with the connection :math:`s-l` (sum of the weights divided by num of weights).
-This value can also be presented as a normalised CS: the CS is then divided by the max CS for the layer :math:`l` (or for the layer :math:`s`), to give it a value between 0 and 1.
+This value can also be presented as a normalised CS: the CS is then divided by the max CS for the layer :math:`l` to give it a value between 0 and 1.
 
 The **relevance for sources** of a layer :math:`l` is also a value between 0 and 1.
 It expresses how many of the connections received by :math:`l` are 'relevant enough' for their source layers to send information through them.
 For each connection from a previous layer :math:`s` (between the previous block's output and :math:`l-1`), the relevance is increased by :math:`1/(l+1)`
 if the connection's CS is >= 0.67 * the max CS for all connections sent by :math:`s`.
 
-The current self-constructing algorithm trains and builds the network in two stages:
+The most recent version of the self-constructing algorithm trains and builds the network in two stages:
 
 - **Ascension stage:** a new layer is added to the last block every ``ascension_threshold`` epochs.
   The stage ends when at least one layer in the block has a 'relevance for sources' equal to 1.
@@ -29,6 +29,15 @@ The current self-constructing algorithm trains and builds the network in two sta
   The ``patience_parameter`` is another constant parameter, its default value is 200.
 
 After the completion of these two stages, the training ends. Experiments are currently being undertaken to implement a more efficient self-constructing algorithm.
+
+In addition to the latest version, previous variants of the algorithm can be used by specifying parameters (see "Running the code" below).
+The most recent variant is always the default version of the algorithm. The variants currently available are.
+
+- **Variant #0:** Performs an ascension stage, then trains the resulting network until a max number of total epochs (default 300) has elapsed.
+
+- **Variant #1:** Performs an ascension stage, then an improvement stage without using the restarting countdown system. The improvement stage lasts until a max number of total epochs (default 300) has elapsed.
+
+- **Variant #2:** **This is the most recent version.** Performs an ascension stage, then an improvement stage that ends based on a restarting countdown system.
 
 Running the code
 ----------------
@@ -48,9 +57,16 @@ Each model can be tested on the following datasets:
 
 **Example runs:**
 
-``python run_dense_net.py --train --test -m 'DenseNet-BC' --dataset=C10 --self-construct -at 10 -pp 200``
+``python run_dense_net.py --train --test -m 'DenseNet' --dataset=C10 --self-construct -at 10 -pp 200``
 
-Here the program uses the algorithm to self-construct a DenseNet-BC trained on the Cifar10 dataset, and then tests it.
+Here the program uses the self-constructing algorithm (most recent variant) to build a DenseNet trained on the Cifar10 dataset.
+The resulting self-constructed network is then tested.
+The ``ascension_threshold`` is set to 10, and the ``patience_parameter`` is set to 200.
+
+``python run_dense_net.py --train --test -m 'DenseNet-BC' --dataset=C10+ --self-construct -var 1 -at 20 -pp 100``
+
+Here the program uses the self-constructing algorithm (variant #1) to build a DenseNet-BC trained on the Cifar10 dataset, with data augmentation.
+The resulting self-constructed network is then tested.
 The ``ascension_threshold`` is set to 10, and the ``patience_parameter`` is set to 200.
 
 ``python run_dense_net.py --train --test -m 'DenseNet' --dataset=SVHN --no-self-construct -lnl '12,12,12'``

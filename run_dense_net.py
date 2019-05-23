@@ -114,6 +114,15 @@ if __name__ == '__main__':
 
     # Parameters that define the self-constructing algorithm.
     parser.add_argument(
+        '--self_constructing_variant', '--self_constructing_var', '-var',
+        dest='self_constructing_var', type=int, default=-1,
+        help='Choice on the algorithm variant to use (from oldest to newest).'
+             ' Variants are identified by an int value (0, 1, 2).'
+             ' They are each described in their respective functions'
+             ' (self_constructing_varX). Passing a negative value, or one that'
+             ' does not identify a variant (yet), results in running the'
+             ' most recent (default) variant.')
+    parser.add_argument(
         '--layer_connection_strength', '--layer_cs', '-lcs', dest='layer_cs',
         type=str, choices=['relevance', 'spread'], default='relevance',
         help='Choice on \'layer CS\', how to interpret connection strength'
@@ -261,6 +270,6 @@ if __name__ == '__main__':
         print("Data provider test images: ", data_provider.test.num_examples)
         print("Testing...")
         loss, accuracy = model.test(data_provider.test, batch_size=200)
-        model.print_pertinent_features(loss, accuracy, -1)
+        model.print_pertinent_features(loss, accuracy, -1, True)
         print("mean cross_entropy: %f, mean accuracy: %f" % (
             loss[-1], accuracy))
