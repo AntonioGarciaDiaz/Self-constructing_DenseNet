@@ -9,10 +9,10 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 # Training parameters for CIFAR datasets (10, 100, 10+, 100+).
 train_params_cifar = {
     'batch_size': 64,
-    'max_n_epochs': 300,  # default was 300
+    'max_n_ep': 300,  # default was 300
     'initial_learning_rate': 0.1,
-    'reduce_lr_epoch_1': 150,  # epochs * 0.5, default was 150
-    'reduce_lr_epoch_2': 225,  # epochs * 0.75, default was 225
+    'reduce_lr_1': 0.5,  # mult. by max_n_ep, default was 0.5 (150)
+    'reduce_lr_2': 0.75,  # mult. by max_n_ep, default was 0.75 (225)
     'validation_set': True,
     'validation_split': 0.1,  # None or float
     'shuffle': 'every_epoch',  # None, once_prior_train, every_epoch
@@ -22,10 +22,10 @@ train_params_cifar = {
 # Training parameters for the StreetView House Numbers dataset.
 train_params_svhn = {
     'batch_size': 64,
-    'max_n_epochs': 40,
+    'max_n_ep': 40,
     'initial_learning_rate': 0.1,
-    'reduce_lr_epoch_1': 20,
-    'reduce_lr_epoch_2': 30,
+    'reduce_lr_1': 0.5,  # mult. by max_n_ep, default was 0.5 (20)
+    'reduce_lr_2': 0.75,  # mult. by max_n_ep, default was 0.75 (30)
     'validation_set': True,
     'validation_split': None,  # you may set it 6000 as in the paper
     'shuffle': True,  # shuffle dataset every epoch or not

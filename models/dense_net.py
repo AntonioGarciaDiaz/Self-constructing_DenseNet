@@ -120,7 +120,7 @@ class DenseNet:
         self.layer_cs = layer_cs
         self.asc_thresh = asc_thresh
         self.patience_param = patience_param
-        self.patience_countdown = patience_param
+        self.patience_cntdwn = patience_param
 
         self.should_save_logs = should_save_logs
         self.should_save_ft_logs = should_save_ft_logs
@@ -1227,7 +1227,7 @@ class DenseNet:
         This algorithm consists in a succession of two stages:
         - Ascension: add one layer every asc_thresh training epochs, break the
           loop when a layer settles (its layer cs for sources is == 1).
-        - Improvement: end the stage when a total of max_n_epochs epochs have
+        - Improvement: end the stage when a total of max_n_ep epochs have
           elapsed (since the addition of the last block).
 
         Args:
@@ -1252,7 +1252,7 @@ class DenseNet:
 
         # stage #1 = improvement stage
         if self.algorithm_stage == 1:
-            if epoch >= self.max_n_epochs:
+            if epoch >= self.max_n_ep:
                 continue_training = False
 
         return continue_training
@@ -1267,7 +1267,7 @@ class DenseNet:
         This algorithm consists in a succession of two stages:
         - Ascension: add one layer every asc_thresh training epochs, break the
           loop when a layer settles (its layer cs for sources is == 1).
-        - Improvement: end the stage when a total of max_n_epochs epochs have
+        - Improvement: end the stage when a total of max_n_ep epochs have
           elapsed (since the addition of the last block),
           if another layer settles, add a layer and restart the countdown.
 
@@ -1294,7 +1294,7 @@ class DenseNet:
 
         # stage #1 = improvement stage
         if self.algorithm_stage == 1:
-            if epoch >= self.max_n_epochs:
+            if epoch >= self.max_n_ep:
                 continue_training = False
             elif settled_layers > self.settled_layers_ceil:
                 self.settled_layers_ceil = settled_layers
@@ -1338,16 +1338,44 @@ class DenseNet:
 
         # stage #1 = improvement stage
         if self.algorithm_stage == 1:
-            if self.patience_countdown <= 0:
+            if self.patience_cntdwn <= 0:
                 continue_training = False
             elif settled_layers > self.settled_layers_ceil:
                 self.settled_layers_ceil = settled_layers
                 self._new_layer()
-                self.patience_countdown = self.patience_param
+                self.patience_cntdwn = self.patience_param
             else:
-                self.patience_countdown -= 1
+                self.patience_cntdwn -= 1
 
         return continue_training
+
+    def self_constructing_reducelr0(self, learning_rate, initial_lr,
+                                    rlr_1, rlr_2):
+        """
+        An optional learning rate reduction (reducelr #0) to be performed after
+        a step of the self-constructing algorithm (based on the patience
+        countdown, so it only works with variant #2 onwards).
+
+        Whenever the countdown reaches an epoch that corresponds to a given
+        fraction of the patience parameter (the patience_param multiplied by
+        1-rlr_1 or 1-rlr_2), the current learning rate is divided by 10.
+        If at any point the countdown is reset, the current learning rate
+        returns to its initial value.
+
+        Args:
+            learning_rate: `int`, the current learning rate value.
+            initial_lr: the initial value for the learning rate.
+            rlr_1: the fraction of epochs through the countdown at which
+                the learning rate must be reduced (/10) for the first time.
+            rlr_2: the fraction of epochs through the countdown at which
+                the learning rate must be reduced (/10) for the second time.
+        """
+        if (self.patience_cntdwn == int(self.patience_param * (1-rlr_1))):
+            learning_rate = learning_rate / 10
+        elif (self.patience_cntdwn == int(self.patience_param * (1-rlr_2))):
+            learning_rate = learning_rate / 10
+        elif (self.patience_cntdwn == self.patience_param):
+            learning_rate = initial_lr
 
     def train_one_epoch(self, data, batch_size, learning_rate):
         """
@@ -1430,14 +1458,14 @@ class DenseNet:
 
         Args (in train_params):
             batch_size: `int`, number of examples in a training batch;
-            max_n_epochs: `int`, maximum number of training epochs to run;
+            max_n_ep: `int`, maximum number of training epochs to run;
             initial_learning_rate: `int`, initial learning rate for optimizer;
-            reduce_lr_epoch_1: `int`, if not self-constructing the network,
-                first epoch where the current learning rate is divided by 10
-                (initial_learning_rate/10);
-            reduce_lr_epoch_2: `int`, if not self-constructing the network,
-                second epoch where the current learning rate is divided by 10
-                (initial_learning_rate/100);
+            reduce_lr_1: `float`, if not self-constructing the network,
+                first fraction of max_n_ep after which the current
+                learning rate is divided by 10 (initial_learning_rate/10);
+            reduce_lr_2: `float`, if not self-constructing the network,
+                second fraction of max_n_ep after which the current
+                learning rate is divided by 10 (initial_learning_rate/100);
             validation_set: `bool`, should a validation set be used or not;
             validation_split: `float` or None;
                 `float`: chunk of the training set used as the validation set;
@@ -1454,11 +1482,12 @@ class DenseNet:
                 'by_chanels': substract the mean of the pixel's chanel and
                     divide the result by the channel's standard deviation.
         """
-        self.max_n_epochs = train_params['max_n_epochs']
+        self.max_n_ep = train_params['max_n_ep']
+        initial_lr = train_params['initial_learning_rate']
         learning_rate = train_params['initial_learning_rate']
         batch_size = train_params['batch_size']
-        reduce_lr_epoch_1 = train_params['reduce_lr_epoch_1']
-        reduce_lr_epoch_2 = train_params['reduce_lr_epoch_2']
+        rlr_1 = train_params['reduce_lr_1']
+        rlr_2 = train_params['reduce_lr_2']
         validation_set = train_params.get('validation_set', False)
         total_start_time = time.time()
 
@@ -1472,7 +1501,9 @@ class DenseNet:
 
             # if not self-constructing, may reduce learning rate at some epochs
             if not self.should_self_construct and self.should_change_lr:
-                if epoch == reduce_lr_epoch_1 or epoch == reduce_lr_epoch_2:
+                if (epoch == int(self.max_n_ep * rlr_1)
+                    ) or (epoch ==
+                          int(self.max_n_ep * rlr_2)):
                     learning_rate = learning_rate / 10
                     print("Learning rate has been divided by 10, new lr = %f" %
                           learning_rate)
@@ -1509,23 +1540,28 @@ class DenseNet:
                     # can break here if self-constructing algorithm is over
                     if not self.self_constructing_step(epoch - epoch_last_b):
                         break
+                    # optional learning rate reduction for self-constructing
+                    if self.should_change_lr:
+                        self.self_constructing_reducelr0(learning_rate,
+                                                         initial_lr,
+                                                         rlr_1, rlr_2)
                 # if this is a new block, reset the algorithm's variables
                 else:
                     self.settled_layers_ceil = 0  # highest num of settled lay
                     self.algorithm_stage = 0  # start with ascension stage
-                    self.patience_countdown = self.patience_param
+                    self.patience_cntdwn = self.patience_param
 
             # measure training time for this epoch
             time_per_epoch = time.time() - start_time
-            seconds_left = int((self.max_n_epochs - epoch) * time_per_epoch)
+            seconds_left = int((self.max_n_ep - epoch) * time_per_epoch)
             print("Time per epoch: %s, Est. complete (%d epochs) in: %s" % (
                 str(timedelta(seconds=time_per_epoch)),
-                self.max_n_epochs,
+                self.max_n_ep,
                 str(timedelta(seconds=seconds_left))))
 
-            # increase epoch, break at max_n_epochs if not self-constructing
+            # increase epoch, break at max_n_ep if not self-constructing
             epoch += 1
-            if not self.should_self_construct and epoch >= self.max_n_epochs+1:
+            if not self.should_self_construct and epoch >= self.max_n_ep+1:
                 break
 
         # measure total training time
