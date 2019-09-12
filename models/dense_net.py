@@ -1349,12 +1349,12 @@ class DenseNet:
 
         return continue_training
 
-    def self_constructing_reducelr0(self, learning_rate, initial_lr,
-                                    rlr_1, rlr_2):
+    def self_constr_rlr0(self, learning_rate, initial_lr, rlr_1, rlr_2):
         """
-        An optional learning rate reduction (reducelr #0) to be performed after
+        An optional learning rate reduction (ReduceLR #0) to be performed after
         a step of the self-constructing algorithm (based on the patience
         countdown, so it only works with variant #2 onwards).
+        Returns the new learning rate value.
 
         Whenever the countdown reaches an epoch that corresponds to a given
         fraction of the patience parameter (the patience_param multiplied by
@@ -1376,6 +1376,35 @@ class DenseNet:
             learning_rate = learning_rate / 10
         elif (self.patience_cntdwn == self.patience_param):
             learning_rate = initial_lr
+        return learning_rate
+
+    def self_constr_rlr1(self, learning_rate, initial_lr, rlr_1, rlr_2):
+        """
+        An optional learning rate reduction (ReduceLR #1) to be performed after
+        a step of the self-constructing algorithm (based on the patience
+        countdown, so it only works with variant #2 onwards).
+        Returns the new learning rate value.
+
+        The initial learning rate value is initial_lr.
+        The first time that the countdown reaches an epoch that corresponds to
+        patience_param * (1 - rlr_1), the learning rate becomes initial_lr/10.
+        The first time that the countdown reaches an epoch that corresponds to
+        patience_param * (1 - rlr_2), the learning rate becomes initial_lr/100.
+
+        Args:
+            learning_rate: `int`, the current learning rate value.
+            initial_lr: the initial value for the learning rate.
+            rlr_1: the fraction of epochs through the countdown at which
+                the learning rate must be reduced (/10) for the first time.
+            rlr_2: the fraction of epochs through the countdown at which
+                the learning rate must be reduced (/10) for the second time.
+        """
+        if (self.patience_cntdwn == int(self.patience_param * (1-rlr_1))):
+            learning_rate = min(learning_rate, initial_lr / 10)
+        elif (self.patience_cntdwn == int(self.patience_param * (1-rlr_2))):
+            # learning_rate = min(learning_rate, initial_lr / 100)
+            learning_rate = initial_lr / 100  # min is unnecessary here
+        return learning_rate
 
     def train_one_epoch(self, data, batch_size, learning_rate):
         """
@@ -1542,9 +1571,9 @@ class DenseNet:
                         break
                     # optional learning rate reduction for self-constructing
                     if self.should_change_lr:
-                        self.self_constructing_reducelr0(learning_rate,
-                                                         initial_lr,
-                                                         rlr_1, rlr_2)
+                        learning_rate = self.self_constr_rlr0(learning_rate,
+                                                              initial_lr,
+                                                              rlr_1, rlr_2)
                 # if this is a new block, reset the algorithm's variables
                 else:
                     self.settled_layers_ceil = 0  # highest num of settled lay
