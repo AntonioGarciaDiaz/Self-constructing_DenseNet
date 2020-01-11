@@ -21,12 +21,14 @@ if the connection's CS is >= 0.67 * the max CS for all connections sent by :math
 The most recent version of the self-constructing algorithm trains and builds the network in two stages:
 
 - **Ascension stage:** a new layer is added to the last block every ``ascension_threshold`` epochs.
-  The stage ends when at least one layer in the block has a 'relevance for sources' equal to 1.
   The ``ascension_threshold`` is a constant parameter with a default value of 10.
+  The stage ends when the standard deviation of the last 50 measured accuracies falls below 0.1.
+  In previous versions (variants #0 to #2), it could also end when at least one layer in the block has a 'relevance for sources' equal to 1.
 
 - **Improvement stage:** the algorithm begins a countdown of ``patience_parameter`` epochs before ending the stage.
   If however a layer settles during this stage, a new layer is added and the countdown is restarted.
   The ``patience_parameter`` is another constant parameter, its default value is 200.
+  By default, the learning rate is also reduced in this stage (at 50% and 75% through the countdown).
 
 After the completion of these two stages, the training ends. Experiments are currently being undertaken to implement a more efficient self-constructing algorithm.
 
@@ -37,7 +39,9 @@ The most recent variant is always the default version of the algorithm. The vari
 
 - **Variant #1:** Performs an ascension stage, then an improvement stage without using the restarting countdown system. The improvement stage lasts until a max number of total epochs (default 300) has elapsed.
 
-- **Variant #2:** **This is the most recent version.** Performs an ascension stage, then an improvement stage that ends based on a restarting countdown system.
+- **Variant #2:** Performs an ascension stage, then an improvement stage that ends based on a restarting countdown system.
+
+- **Variant #3:** **This is the most recent version.** Exactly like variant #2, except the ascension stage can only end on basis of the network's accuracy.
 
 Running the code
 ----------------
@@ -95,7 +99,8 @@ It expresses how many of the connections received by :math:`l` are 'relevant eno
 For each connection from a previous layer :math:`s` (between the previous block's output and :math:`l-1`), the relevance is increased by :math:`1/(l+1)`
 if the connection's CS is >= 0.67 * the max CS for all connections received by :math:`l`.
 
-An option for using 'spread' instead of 'relevance' in the algorithm will be implemented in the near future.
+It is possible to use 'spread' instead of 'relevance' in the algorithm, by setting the optional shell argument ``layer_connection_strength`` (or ``layer_cs``, or ``lcs``)
+as follows: ``-lcs 'spread'``. Nevertheless, the use of this form of layerwise interpretation of the CS is experimental and may produce unstable results.
 
 Dependencies
 ------------

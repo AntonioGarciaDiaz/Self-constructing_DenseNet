@@ -22,12 +22,12 @@ train_params_cifar = {
 # Training parameters for the StreetView House Numbers dataset.
 train_params_svhn = {
     'batch_size': 64,
-    'max_n_ep': 40,
+    'max_n_ep': 300,
     'initial_learning_rate': 0.1,
     'reduce_lr_1': 0.5,  # mult. by max_n_ep, default was 0.5 (20)
     'reduce_lr_2': 0.75,  # mult. by max_n_ep, default was 0.75 (30)
     'validation_set': True,
-    'validation_split': None,  # you may set it 6000 as in the paper
+    'validation_split': 6000,  # you may set it 6000 as in the paper
     'shuffle': True,  # shuffle dataset every epoch or not
     'normalization': 'divide_255',
 }
@@ -72,8 +72,8 @@ if __name__ == '__main__':
     parser.add_argument(
         '--layer_num_list', '-lnl',
         type=str, default='1', metavar='',
-        help='List of the number of layers in each block, separated by comas'
-             ' (e.g. \'12,12,12\', default: 1 block with 1 layer)'
+        help='List of the (initial) number of layers in each block, separated'
+             ' by comas (e.g. \'12,12,12\', default: 1 block with 1 layer)'
              ' WARNING: in BC models, each layer is preceded by a bottleneck.')
     parser.add_argument(
         '--keep_prob', '-kp', type=float, metavar='',
@@ -123,6 +123,22 @@ if __name__ == '__main__':
              ' does not identify a variant (yet), results in running the'
              ' most recent (default) variant.')
     parser.add_argument(
+        '--self_constructing_reduce_lr', '--self_constructing_rlr',
+        '--self_const_reduce_lr', '--self_constr_rlr', '-rlr',
+        dest='self_constr_rlr', type=int, default=-1,
+        help='Choice on the learning rate reduction variant to be used with'
+             ' self constructing (from oldest to newest).'
+             ' Variants are identified by an int value (0, 1).'
+             ' They are each described in their respective functions'
+             ' (self_constr_rlrX). Passing a negative value, or one that'
+             ' does not identify a variant (yet), results in running the'
+             ' most recent (default) variant.')
+    parser.add_argument(
+        '--block_count', '--blocks', '-bc',
+        dest='block_count', type=int, default=1,
+        help='Maximum number of dense blocks to self-construct. Default is 1.'
+             ' If the entered value is < 1, it is changed to 1.')
+    parser.add_argument(
         '--layer_connection_strength', '--layer_cs', '-lcs', dest='layer_cs',
         type=str, choices=['relevance', 'spread'], default='relevance',
         help='Choice on \'layer CS\', how to interpret connection strength'
@@ -142,6 +158,22 @@ if __name__ == '__main__':
         help='Patience parameter, for the self-constructing algorithm:'
              ' number of epochs to wait before stopping the improvement'
              ' stage, unless a new layer settles.')
+    parser.add_argument(
+        '--accuracy_std_tolerance', '--std_tolerance', '-stdt',
+        dest='std_tolerance', type=int, default=0.1,
+        help='Accuracy std tolerance, for the self-constructing algorithm:'
+             ' minimum standard deviation value for a window of previous'
+             ' accuracy values in the ascension stage. If the std of the'
+             ' previous accuracies (std_window) goes below std_tolerance,'
+             ' the ascension stage is forcefully terminated.')
+    parser.add_argument(
+        '--accuracy_std_window', '--std_window', '-stdw',
+        dest='std_window', type=int, default=50,
+        help='Accuracy std window, for the self-constructing algorithm:'
+             ' number of previous accuracy values that are taken into account'
+             ' for deciding if the ascension stage should be forcefully'
+             ' terminated (this happens when the std of these accuracy'
+             ' values is below std_tolerance)')
 
     # Wether or not to write TensorFlow logs.
     parser.add_argument(

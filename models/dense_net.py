@@ -1,6 +1,7 @@
 import os
 import time
 import shutil
+from collections import deque
 from datetime import timedelta, datetime
 
 import numpy as np
@@ -21,7 +22,9 @@ class DenseNet:
                  keep_prob, num_inter_threads, num_intra_threads,
                  weight_decay, nesterov_momentum, model_type, dataset,
                  should_self_construct, should_change_lr,
-                 self_constructing_var, layer_cs, asc_thresh, patience_param,
+                 self_constructing_var, self_constr_rlr, block_count,
+                 layer_cs, asc_thresh, patience_param,
+                 std_tolerance, std_window,
                  should_save_logs, should_save_ft_logs, ft_period,
                  ft_filters, ft_cross_entropies,
                  should_save_model, should_save_images,
@@ -50,10 +53,16 @@ class DenseNet:
             self_constructing_var: `int`, variant of the self-constructing
                 algorithm to be used, if the int does not identify any variant
                 the most recent (default) variant is used;
+            self_constr_rlr: `int`, learning rate reduction variant to be used
+                with the self-constructing algorithm, if the int does not
+                identify any variant the most recent (default) variant is used;
+            block_count: `int`, maximum number of blocks to self-construct;
             layer_cs: `str`, 'layer CS', preferred interpretation of CS values
                 when evaluating layers (using 'relevance' or 'spread');
             asc_thresh: `int`, ascension threshold for self-constructing;
             patience_param: `int`, patience parameter for self-constructing;
+            std_tolerance: `int`, std tolerance for self-constructing;
+            std_window: `int`, std window for self-constructing;
             should_save_logs: `bool`, should tensorflow logs be saved or not;
             should_save_ft_logs: `bool`, should feature logs be saved or not;
             ft_period: `int`, number of epochs between two measurements of
@@ -92,7 +101,6 @@ class DenseNet:
                 k, self.layer_num_list[k]) for k in range(len(
                     self.layer_num_list))))
         if bc_mode:
-            self.layer_num_list[:] = [-(-l // 2) for l in self.layer_num_list]
             print('\n'.join('Block %d: %d bottleneck layers and %d composite'
                             'layers.' % (k, self.layer_num_list[k],
                                          self.layer_num_list[k])
@@ -114,13 +122,27 @@ class DenseNet:
             self.self_constructing_step = self.self_constructing_var0
         elif self_constructing_var == 1:
             self.self_constructing_step = self.self_constructing_var1
-        else:
+        elif self_constructing_var == 2:
             self.self_constructing_step = self.self_constructing_var2
+        else:
+            self.self_constructing_step = self.self_constructing_var3
 
+        # Choice of the learning rate reduction variant for self-constructing.
+        if self_constr_rlr == 0:
+            self.self_constr_rlr = self.self_constr_rlr0
+        else:
+            self.self_constr_rlr = self.self_constr_rlr1
+
+        self.block_count = max(1, block_count)
         self.layer_cs = layer_cs
         self.asc_thresh = asc_thresh
         self.patience_param = patience_param
         self.patience_cntdwn = patience_param
+
+        if should_self_construct:
+            self.std_tolerance = std_tolerance
+            self.std_window = std_window
+            self.acc_FIFO = deque(maxlen=self.std_window)
 
         self.should_save_logs = should_save_logs
         self.should_save_ft_logs = should_save_ft_logs
@@ -858,6 +880,68 @@ class DenseNet:
                         self.cross_entropy.append(cross_entropy)
         return output
 
+    # FOR ADDING BACK PRUNED BLOCKS AND LAYERS --------------------------------
+    # -------------------------------------------------------------------------
+
+    def add_nondense_internal_layer(self, _input, layer, growth_rate):
+        """
+        Adds a pruned convolutional layer within a pruned block WITHOUT
+        following the dense paradigm: the layer's output is not concatenated
+        with its direct input.
+
+        This may allow for another function to create a custom concatenation,
+        as in the case of pruned blocks.
+        FULL DESCRIPTION TBA.
+        """
+        with tf.variable_scope("layer_%d_nd" % layer):
+            # use the composite function H_l (3x3 kernel conv)
+            if not self.bc_mode:
+                comp_out, filter_ref = self.composite_function(
+                    _input, out_features=growth_rate, kernel_size=3)
+            # in DenseNet-BC mode, add a bottleneck layer before H_l (1x1 conv)
+            elif self.bc_mode:
+                bottleneck_out, filter_ref = self.bottleneck(
+                    _input, out_features=growth_rate)
+                if self.ft_filters or self.should_self_construct:
+                    self.filter_ref_list[-1].append(filter_ref)
+                comp_out, filter_ref = self.composite_function(
+                    bottleneck_out, out_features=growth_rate, kernel_size=3)
+            # save a reference to the composite function's filter
+            if self.ft_filters or self.should_self_construct:
+                self.filter_ref_list[-1].append(filter_ref)
+        return output
+
+    def add_pruned_block(self, _input, block, growth_rate, connections):
+        """
+        Adds a predefined block with pruned connections, meant to replace the
+        current last block (the last item in filter_ref_list is also erased).
+        FULL DESCRIPTION TBA.
+        """
+        if self.ft_filters or self.should_self_construct:
+            self.filter_ref_list[-1] = []
+        self.cross_entropy = []
+
+        with tf.variable_scope("Block_%d_prun" % block) as self.current_block:
+            output = [_input]
+            for layer in range(len(connections)):
+                # add a nondense layer (a layer without the concatenation)
+                output.append(self.add_nondense_internal_layer(
+                    output[-1], layer, growth_rate))
+                # concatenate the layer's output with selected previous outputs
+                if TF_VERSION[0] >= 1 and TF_VERSION[1] >= 0:
+                    output = tf.concat(axis=3, values=(_input, comp_out))
+                else:
+                    output = tf.concat(3, (_input, comp_out))
+
+                if self.ft_cross_entropies:
+                    # Save the cross-entropy for all layers except the last one
+                    # (it is always saved as part of the end-graph operations)
+                    if layer != layers_in_block-1:
+                        _, cross_entropy = self.cross_entropy_loss(
+                            output[-1], self.labels, block, layer)
+                        self.cross_entropy.append(cross_entropy)
+        return output[-1]
+
     # TRANSITION LAYERS -------------------------------------------------------
     # -------------------------------------------------------------------------
 
@@ -1026,9 +1110,10 @@ class DenseNet:
         In DenseNet-BC mode, the new module will begin with two layers
         (bottleneck and compression) instead of just one.
         """
-        self.output = self.transition_layer(self.output, self.total_blocks-1)
+        self.input_last_b = self.transition_layer(
+            self.output, self.total_blocks-1)
         self.output = self.add_block(
-            self.output, self.total_blocks, self.growth_rate, 1, True)
+            self.input_last_b, self.total_blocks, self.growth_rate, 1, True)
         self.layer_num_list.append(1)
         self.total_blocks += 1
 
@@ -1062,7 +1147,7 @@ class DenseNet:
 
         # first add a 3x3 convolution layer with first_output_features outputs
         with tf.variable_scope("Initial_convolution"):
-            self.output, filter_ref = self.conv2d(
+            self.input_last_b, filter_ref = self.conv2d(
                 self.output, out_features=self.first_output_features,
                 kernel_size=3)
             if self.ft_filters or self.should_self_construct:
@@ -1071,11 +1156,11 @@ class DenseNet:
         # then add the required blocks
         for block in range(self.total_blocks):
             self.output = self.add_block(
-                self.output, block, growth_rate, layers_in_each_block[block],
-                block == self.total_blocks - 1)
+                self.input_last_b, block, growth_rate,
+                layers_in_each_block[block], block == self.total_blocks - 1)
             #  all blocks except the last have transition layers
             if block != self.total_blocks - 1:
-                self.output = self.transition_layer(self.output, block)
+                self.input_last_b = self.transition_layer(self.output, block)
 
         self._define_end_graph_operations()
 
@@ -1217,6 +1302,9 @@ class DenseNet:
         if self.should_save_ft_logs:
             self.feature_writer.write('\n')
 
+    # SELF-CONSTRUCTING ALGORITHM VARIANTS ------------------------------------
+    # -------------------------------------------------------------------------
+
     def self_constructing_var0(self, epoch):
         """
         A step of the self-constructing algorithm (variant #0) for one
@@ -1246,6 +1334,7 @@ class DenseNet:
         # stage #0 = ascension stage
         if self.algorithm_stage == 0:
             if settled_layers > 0:
+                self.settled_layers_ceil = settled_layers
                 self.algorithm_stage += 1
             elif (epoch-1) % self.asc_thresh == 0:
                 self._new_layer()
@@ -1253,7 +1342,9 @@ class DenseNet:
         # stage #1 = improvement stage
         if self.algorithm_stage == 1:
             if epoch >= self.max_n_ep:
+                # stop algorithm and reset everything
                 continue_training = False
+                self.algorithm_stage = 0
 
         return continue_training
 
@@ -1295,7 +1386,9 @@ class DenseNet:
         # stage #1 = improvement stage
         if self.algorithm_stage == 1:
             if epoch >= self.max_n_ep:
+                # stop algorithm and reset everything
                 continue_training = False
+                self.algorithm_stage = 0
             elif settled_layers > self.settled_layers_ceil:
                 self.settled_layers_ceil = settled_layers
                 self._new_layer()
@@ -1330,7 +1423,7 @@ class DenseNet:
 
         # stage #0 = ascension stage
         if self.algorithm_stage == 0:
-            if settled_layers > 0:
+            if settled_layers > 0 and self.layer_num_list[-1] > 2:
                 self.settled_layers_ceil = settled_layers
                 self.algorithm_stage += 1
             elif (epoch-1) % self.asc_thresh == 0:
@@ -1339,8 +1432,12 @@ class DenseNet:
         # stage #1 = improvement stage
         if self.algorithm_stage == 1:
             if self.patience_cntdwn <= 0:
+                # stop algorithm and reset everything
                 continue_training = False
+                self.algorithm_stage = 0
+                self.patience_cntdwn = self.patience_param
             elif settled_layers > self.settled_layers_ceil:
+                # if a layer settles, add a layer and restart the countdown
                 self.settled_layers_ceil = settled_layers
                 self._new_layer()
                 self.patience_cntdwn = self.patience_param
@@ -1348,6 +1445,124 @@ class DenseNet:
                 self.patience_cntdwn -= 1
 
         return continue_training
+
+    def self_constructing_var3(self, epoch):
+        """
+        A step of the self-constructing algorithm (variant #3) for one
+        training epoch.
+        Adds new layers to the last block depending on parameters.
+        Returns True if training should continue, False otherwise.
+
+        This algorithm consists in a succession of two stages:
+        - Ascension: add one layer every asc_thresh training epochs, the loop
+          can only be broken externally (i.e. through accuracy std tolerance).
+        - Improvement: countdown of patience_param epochs until the stage ends,
+          if another layer settles, add a layer and restart the countdown.
+
+        Args:
+            epoch: `int`, current training epoch (since adding the last block).
+        """
+        continue_training = True
+        cs, lcs_dst, lcs_src = self.process_block_filters(
+            self.total_blocks-1, epoch)
+
+        # calculate number of settled layers (layers with lcs_src == 1)
+        settled_layers = 0
+        for src in range(1, len(lcs_src)):
+            if lcs_src[src] >= 1:
+                settled_layers += 1
+
+        # stage #0 = ascension stage
+        if self.algorithm_stage == 0:
+            if (epoch-1) % self.asc_thresh == 0:
+                self._new_layer()
+
+        # stage #1 = improvement stage
+        if self.algorithm_stage == 1:
+            if self.patience_cntdwn <= 0:
+                # stop algorithm and reset everything
+                continue_training = False
+                self.algorithm_stage = 0
+                self.patience_cntdwn = self.patience_param
+            elif settled_layers > self.settled_layers_ceil:
+                # if a layer settles, add a layer and restart the countdown
+                self.settled_layers_ceil = settled_layers
+                self._new_layer()
+                self.patience_cntdwn = self.patience_param
+            else:
+                self.patience_cntdwn -= 1
+
+        return continue_training
+
+    def self_constructing_var4(self, epoch):
+        """
+        LIKE VAR 2 EXCEPT WITH PRUNING.
+        FULL DESCRIPTION TBA.
+        """
+        continue_training = True
+        cs, lcs_dst, lcs_src = self.process_block_filters(
+            self.total_blocks-1, epoch)
+
+        # calculate number of settled layers (layers with lcs_src == 1)
+        settled_layers = 0
+        for src in range(1, len(lcs_src)):
+            if lcs_src[src] >= 1:
+                settled_layers += 1
+
+        # stage #0 = ascension stage
+        if self.algorithm_stage == 0:
+            if settled_layers > 0 and self.layer_num_list[-1] > 2:
+                self.settled_layers_ceil = settled_layers
+                self.algorithm_stage += 1
+            elif (epoch-1) % self.asc_thresh == 0:
+                self._new_layer()
+
+        # stage #1 = improvement stage
+        if self.algorithm_stage == 1:
+            if self.patience_cntdwn <= 0:
+                # when the countdown ends, go to next stage and reset countdown
+                self.algorithm_stage += 1
+                self.patience_cntdwn = self.patience_param
+            elif settled_layers > self.settled_layers_ceil:
+                # if a layer settles, add a layer and restart the countdown
+                self.settled_layers_ceil = settled_layers
+                self._new_layer()
+                self.patience_cntdwn = self.patience_param
+            else:
+                self.patience_cntdwn -= 1
+
+        # stage #2 = pruning stage
+        if self.algorithm_stage == 2:
+            # find which connections must be kept
+            connections_to_keep = []
+            for f in range(len(cs)):
+                print(cs[f])
+                connections_to_keep.append([])
+                # for keeping a connection, its cs must be > tresh_fract of the
+                # maximum cs between the layer and any of its sources.
+                max_cs = max(cs[f])
+                tresh_fract = 0.33
+                for c in range(len(cs[f])):
+                    if cs[f][c]/max_cs > tresh_fract:
+                        connections_to_keep[f].append(c)
+            # rebuilding the network
+            print(connections_to_keep)
+            # self.output = self.add_pruned_block(
+            #     self.input_last_b, self.total_blocks-1, self.growth_rate,
+            #     connections_to_keep)
+            # go to the next stage
+            self.algorithm_stage += 1
+
+        # stage #3 = recovery stage
+        if self.algorithm_stage == 3:
+            # stop algorithm and reset algorithm stage
+            continue_training = False
+            self.algorithm_stage = 0
+
+        return continue_training
+
+    # LEARNING RATE REDUCTION VARIANTS (FOR SELF CONSTRUCTING) ----------------
+    # -------------------------------------------------------------------------
 
     def self_constr_rlr0(self, learning_rate, initial_lr, rlr_1, rlr_2):
         """
@@ -1405,6 +1620,9 @@ class DenseNet:
             # learning_rate = min(learning_rate, initial_lr / 100)
             learning_rate = initial_lr / 100  # min is unnecessary here
         return learning_rate
+
+    # MAIN TRAINING AND TESTING FUNCTIONS -------------------------------------
+    # -------------------------------------------------------------------------
 
     def train_one_epoch(self, data, batch_size, learning_rate):
         """
@@ -1566,14 +1784,25 @@ class DenseNet:
             # step of the self-constructing algorithm
             if self.should_self_construct:
                 if epoch - epoch_last_b != 1:
+                    # if the accuracy doesn't change much, ends the ascension.
+                    if self.algorithm_stage == 0:
+                        # add the current accuracy to the FIFO list.
+                        self.acc_FIFO.append(acc)
+                        if len(self.acc_FIFO) == self.std_window:
+                            if np.std(self.acc_FIFO) < self.std_tolerance:
+                                self.algorithm_stage += 1
                     # can break here if self-constructing algorithm is over
                     if not self.self_constructing_step(epoch - epoch_last_b):
-                        break
+                        # add another block if block_count not yet exceeded
+                        if self.total_blocks < self.block_count:
+                            self._new_block()
+                        else:
+                            break
                     # optional learning rate reduction for self-constructing
                     if self.should_change_lr:
-                        learning_rate = self.self_constr_rlr0(learning_rate,
-                                                              initial_lr,
-                                                              rlr_1, rlr_2)
+                        learning_rate = self.self_constr_rlr(learning_rate,
+                                                             initial_lr,
+                                                             rlr_1, rlr_2)
                 # if this is a new block, reset the algorithm's variables
                 else:
                     self.settled_layers_ceil = 0  # highest num of settled lay
