@@ -117,11 +117,11 @@ if __name__ == '__main__':
         '--self_constructing_variant', '--self_constructing_var', '-var',
         dest='self_constructing_var', type=int, default=-1,
         help='Choice on the algorithm variant to use (from oldest to newest).'
-             ' Variants are identified by an int value (0, 1, 2).'
+             ' Variants are identified by an int value (0, 1, 2, 3).'
              ' They are each described in their respective functions'
              ' (self_constructing_varX). Passing a negative value, or one that'
              ' does not identify a variant (yet), results in running the'
-             ' most recent (default) variant.')
+             ' most recent (default) operational variant.')
     parser.add_argument(
         '--self_constructing_reduce_lr', '--self_constructing_rlr',
         '--self_const_reduce_lr', '--self_constr_rlr', '-rlr',
@@ -198,6 +198,14 @@ if __name__ == '__main__':
         '--feature_period', '--ft_period', '-fp',
         dest='ft_period', type=int, default=1,
         help='Number of epochs between each measurement of feature values.')
+    parser.add_argument(
+        '--ft_comma_separator', '--ft_comma', '-comma',
+        dest='ft_comma', type=str, default=';',
+        help='Comma (value) separator for the CSV feature log.')
+    parser.add_argument(
+        '--ft_decimal_separator', '--ft_decimal', '-dec',
+        dest='ft_decimal', type=str, default=',',
+        help='Decimal separator for the CSV feature log.')
 
     # Wether or not to calculate certain feature values (saved in ft-logs).
     parser.add_argument(

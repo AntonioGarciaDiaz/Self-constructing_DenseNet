@@ -26,7 +26,7 @@ class DenseNet:
                  layer_cs, asc_thresh, patience_param,
                  std_tolerance, std_window,
                  should_save_logs, should_save_ft_logs, ft_period,
-                 ft_filters, ft_cross_entropies,
+                 ft_comma, ft_decimal, ft_filters, ft_cross_entropies,
                  should_save_model, should_save_images,
                  renew_logs=False,
                  reduction=1.0,
@@ -67,6 +67,8 @@ class DenseNet:
             should_save_ft_logs: `bool`, should feature logs be saved or not;
             ft_period: `int`, number of epochs between two measurements of
                 feature values (e.g. accuracy, loss, weight mean and std);
+            ft_comma: `str`, 'comma' separator in the CSV feature logs;
+            ft_decimal: `str`, 'decimal' separator in the CSV feature logs;
             ft_filters: `bool`, should check filter features or not;
             ft_cross_entropies: `bool`, should measure cross-entropies for
                 each individual layer in the last block or not;
@@ -147,6 +149,8 @@ class DenseNet:
         self.should_save_logs = should_save_logs
         self.should_save_ft_logs = should_save_ft_logs
         self.ft_period = ft_period
+        self.ftc = ft_comma
+        self.ftd = ft_decimal
         self.ft_filters = ft_filters
         self.ft_cross_entropies = ft_cross_entropies
 
@@ -158,7 +162,7 @@ class DenseNet:
         self._define_inputs()
         self._build_graph()
         self._initialize_session()
-        self._count_trainable_params()
+        self._count_useful_trainable_params()
 
     # -------------------------------------------------------------------------
     # ------------------------ SAVING AND LOADING DATA ------------------------
@@ -349,22 +353,22 @@ class DenseNet:
 
             if self.should_save_ft_logs:
                 # write all of the above in the feature log
-                self.feature_writer.write((';\"%f\"' % (lcs_dst[l])
-                                           ).replace(".", ","))
-                self.feature_writer.write(';\"\"')
+                self.feature_writer.write(('%s\"%f\"' % (self.ftc, lcs_dst[l])
+                                           ).replace(".", self.ftd))
+                self.feature_writer.write('%s\"\"' % self.ftc)
                 for d in range(l, self.layer_num_list[b]):
                     self.feature_writer.write((
-                        ';\"%f\"' % (cs_table_ls[d][l]/max(
+                        '%s\"%f\"' % (self.ftc, cs_table_ls[d][l]/max(
                             fwd[l] for fwd in cs_table_ls if len(fwd) > l))
-                        ).replace(".", ","))
-                self.feature_writer.write(';\"\"')
+                        ).replace(".", self.ftd))
+                self.feature_writer.write('%s\"\"' % self.ftc)
                 for s in range(len(cs_table_ls[l])):
-                    self.feature_writer.write((
-                        ';\"%f\"' % (cs_table_ls[l][s]/max(cs_table_ls[l]))
-                        ).replace(".", ","))
-                self.feature_writer.write(';\"\"')
-                self.feature_writer.write((';\"%f\"' % (lcs_src[l])
-                                           ).replace(".", ","))
+                    self.feature_writer.write(('%s\"%f\"' % (
+                        self.ftc, cs_table_ls[l][s]/max(cs_table_ls[l]))
+                        ).replace(".", self.ftd))
+                self.feature_writer.write('%s\"\"' % self.ftc)
+                self.feature_writer.write(('%s\"%f\"' % (self.ftc, lcs_src[l])
+                                           ).replace(".", self.ftd))
 
     # -------------------------------------------------------------------------
     # ----------------------- PROCESSING FEATURE VALUES -----------------------
@@ -880,68 +884,6 @@ class DenseNet:
                         self.cross_entropy.append(cross_entropy)
         return output
 
-    # FOR ADDING BACK PRUNED BLOCKS AND LAYERS --------------------------------
-    # -------------------------------------------------------------------------
-
-    def add_nondense_internal_layer(self, _input, layer, growth_rate):
-        """
-        Adds a pruned convolutional layer within a pruned block WITHOUT
-        following the dense paradigm: the layer's output is not concatenated
-        with its direct input.
-
-        This may allow for another function to create a custom concatenation,
-        as in the case of pruned blocks.
-        FULL DESCRIPTION TBA.
-        """
-        with tf.variable_scope("layer_%d_nd" % layer):
-            # use the composite function H_l (3x3 kernel conv)
-            if not self.bc_mode:
-                comp_out, filter_ref = self.composite_function(
-                    _input, out_features=growth_rate, kernel_size=3)
-            # in DenseNet-BC mode, add a bottleneck layer before H_l (1x1 conv)
-            elif self.bc_mode:
-                bottleneck_out, filter_ref = self.bottleneck(
-                    _input, out_features=growth_rate)
-                if self.ft_filters or self.should_self_construct:
-                    self.filter_ref_list[-1].append(filter_ref)
-                comp_out, filter_ref = self.composite_function(
-                    bottleneck_out, out_features=growth_rate, kernel_size=3)
-            # save a reference to the composite function's filter
-            if self.ft_filters or self.should_self_construct:
-                self.filter_ref_list[-1].append(filter_ref)
-        return output
-
-    def add_pruned_block(self, _input, block, growth_rate, connections):
-        """
-        Adds a predefined block with pruned connections, meant to replace the
-        current last block (the last item in filter_ref_list is also erased).
-        FULL DESCRIPTION TBA.
-        """
-        if self.ft_filters or self.should_self_construct:
-            self.filter_ref_list[-1] = []
-        self.cross_entropy = []
-
-        with tf.variable_scope("Block_%d_prun" % block) as self.current_block:
-            output = [_input]
-            for layer in range(len(connections)):
-                # add a nondense layer (a layer without the concatenation)
-                output.append(self.add_nondense_internal_layer(
-                    output[-1], layer, growth_rate))
-                # concatenate the layer's output with selected previous outputs
-                if TF_VERSION[0] >= 1 and TF_VERSION[1] >= 0:
-                    output = tf.concat(axis=3, values=(_input, comp_out))
-                else:
-                    output = tf.concat(3, (_input, comp_out))
-
-                if self.ft_cross_entropies:
-                    # Save the cross-entropy for all layers except the last one
-                    # (it is always saved as part of the end-graph operations)
-                    if layer != layers_in_block-1:
-                        _, cross_entropy = self.cross_entropy_loss(
-                            output[-1], self.labels, block, layer)
-                        self.cross_entropy.append(cross_entropy)
-        return output[-1]
-
     # TRANSITION LAYERS -------------------------------------------------------
     # -------------------------------------------------------------------------
 
@@ -1102,6 +1044,7 @@ class DenseNet:
         self.update_paths()
         self._define_end_graph_operations()
         self._initialize_uninitialized_variables()
+        self._count_useful_trainable_params()
 
     def _new_block(self):
         """
@@ -1110,10 +1053,10 @@ class DenseNet:
         In DenseNet-BC mode, the new module will begin with two layers
         (bottleneck and compression) instead of just one.
         """
-        self.input_last_b = self.transition_layer(
+        self.last_block_in = self.transition_layer(
             self.output, self.total_blocks-1)
         self.output = self.add_block(
-            self.input_last_b, self.total_blocks, self.growth_rate, 1, True)
+            self.last_block_in, self.total_blocks, self.growth_rate, 1, True)
         self.layer_num_list.append(1)
         self.total_blocks += 1
 
@@ -1133,6 +1076,7 @@ class DenseNet:
         self.update_paths()
         self._define_end_graph_operations()
         self._initialize_uninitialized_variables()
+        self._count_useful_trainable_params()
 
     def _build_graph(self):
         """
@@ -1147,7 +1091,7 @@ class DenseNet:
 
         # first add a 3x3 convolution layer with first_output_features outputs
         with tf.variable_scope("Initial_convolution"):
-            self.input_last_b, filter_ref = self.conv2d(
+            self.last_block_in, filter_ref = self.conv2d(
                 self.output, out_features=self.first_output_features,
                 kernel_size=3)
             if self.ft_filters or self.should_self_construct:
@@ -1156,11 +1100,11 @@ class DenseNet:
         # then add the required blocks
         for block in range(self.total_blocks):
             self.output = self.add_block(
-                self.input_last_b, block, growth_rate,
+                self.last_block_in, block, growth_rate,
                 layers_in_each_block[block], block == self.total_blocks - 1)
             #  all blocks except the last have transition layers
             if block != self.total_blocks - 1:
-                self.input_last_b = self.transition_layer(self.output, block)
+                self.last_block_in = self.transition_layer(self.output, block)
 
         self._define_end_graph_operations()
 
@@ -1234,13 +1178,60 @@ class DenseNet:
         Then prints the number of parameters.
         """
         total_parameters = 0
+        print("Variable names:")
+        for variable in tf.trainable_variables():
+            print(variable.name)
+            shape = variable.get_shape()
+            variable_parameters = 1
+            for dim in shape:
+                variable_parameters *= dim.value
+            total_parameters += variable_parameters
+        print("Total trainable params: %.1fk" % (total_parameters / 1e3))
+
+    def _count_useful_trainable_params(self):
+        """
+        Uses TensorFlow commands to count the total number of trainable
+        parameters in the graph, as well as the number of parameters that are
+        currently 'useful'. By 'useful' parameters are meant the multiplied
+        dimensions of each TF variable that is not a discarded transition to
+        classes.
+        The method prints not only the number of parameters, but also the
+        number of parameters in the convolutional and fully connected parts
+        of the TensorFlow graph.
+        """
+        total_parameters = 0
+        useful_conv_params = 0
+        useful_fc_params = 0
+        fc_name = "Transition_to_classes_block_"
+        true_fc_name = fc_name + "%d_layer_%d" % (self.total_blocks-1,
+                                                  self.layer_num_list[-1]-1)
+        true_fc_batchnorm_name = true_fc_name + "/BatchNorm"
+
         for variable in tf.trainable_variables():
             shape = variable.get_shape()
-            variable_parametes = 1
+            variable_parameters = 1
             for dim in shape:
-                variable_parametes *= dim.value
-            total_parameters += variable_parametes
+                variable_parameters *= dim.value
+            # Add all identified parameters to total_parameters.
+            total_parameters += variable_parameters
+            # Add params not in Transition_to_classes to useful_conv_params.
+            if not variable.name.startswith(fc_name):
+                useful_conv_params += variable_parameters
+            # For the true Transition_to_classes (the last one):
+            elif variable.name.startswith(true_fc_name):
+                # If part of the batchnorm, then add to useful_conv_params.
+                if variable.name.startswith(true_fc_batchnorm_name):
+                    useful_conv_params += variable_parameters
+                # Otherwise, add to useful_fc_params.
+                else:
+                    useful_fc_params += variable_parameters
+        # Sum up the two useful parameters counts.
+        total_useful_parameters = useful_conv_params + useful_fc_params
+
         print("Total trainable params: %.1fk" % (total_parameters / 1e3))
+        print("Total useful params: %.1fk" % (total_useful_parameters / 1e3))
+        print("\tConvolutional: %.1fk" % (useful_conv_params / 1e3))
+        print("\tFully Connected: %.1fk" % (useful_fc_params / 1e3))
 
     # -------------------------------------------------------------------------
     # -------------------- TRAINING AND TESTING THE MODEL ---------------------
@@ -1280,14 +1271,15 @@ class DenseNet:
 
         if self.should_save_ft_logs:
             # save the previously printed feature values
-            self.feature_writer.write(("\"Epoch %d\";\"%f\";" % (
-                epoch, accuracy)).replace(".", ","))
+            self.feature_writer.write(("\"Epoch %d\"%s\"%f\"%s" % (
+                epoch, self.ftc, accuracy, self.ftc)).replace(".", self.ftd))
             if validation_set:
                 for l in range(len(loss)):
-                    self.feature_writer.write(("\"%f\";" % loss[l]
-                                               ).replace(".", ","))
+                    self.feature_writer.write(("\"%f\"%s" % (loss[l], self.ftc)
+                                               ).replace(".", self.ftd))
             else:
-                self.feature_writer.write(("\"%f\";" % loss).replace(".", ","))
+                self.feature_writer.write(("\"%f\"%s" % (loss, self.ftc)
+                                           ).replace(".", self.ftd))
             self.feature_writer.write('\"\"')
 
         if self.ft_filters:
@@ -1491,73 +1483,6 @@ class DenseNet:
                 self.patience_cntdwn = self.patience_param
             else:
                 self.patience_cntdwn -= 1
-
-        return continue_training
-
-    def self_constructing_var4(self, epoch):
-        """
-        LIKE VAR 2 EXCEPT WITH PRUNING.
-        FULL DESCRIPTION TBA.
-        """
-        continue_training = True
-        cs, lcs_dst, lcs_src = self.process_block_filters(
-            self.total_blocks-1, epoch)
-
-        # calculate number of settled layers (layers with lcs_src == 1)
-        settled_layers = 0
-        for src in range(1, len(lcs_src)):
-            if lcs_src[src] >= 1:
-                settled_layers += 1
-
-        # stage #0 = ascension stage
-        if self.algorithm_stage == 0:
-            if settled_layers > 0 and self.layer_num_list[-1] > 2:
-                self.settled_layers_ceil = settled_layers
-                self.algorithm_stage += 1
-            elif (epoch-1) % self.asc_thresh == 0:
-                self._new_layer()
-
-        # stage #1 = improvement stage
-        if self.algorithm_stage == 1:
-            if self.patience_cntdwn <= 0:
-                # when the countdown ends, go to next stage and reset countdown
-                self.algorithm_stage += 1
-                self.patience_cntdwn = self.patience_param
-            elif settled_layers > self.settled_layers_ceil:
-                # if a layer settles, add a layer and restart the countdown
-                self.settled_layers_ceil = settled_layers
-                self._new_layer()
-                self.patience_cntdwn = self.patience_param
-            else:
-                self.patience_cntdwn -= 1
-
-        # stage #2 = pruning stage
-        if self.algorithm_stage == 2:
-            # find which connections must be kept
-            connections_to_keep = []
-            for f in range(len(cs)):
-                print(cs[f])
-                connections_to_keep.append([])
-                # for keeping a connection, its cs must be > tresh_fract of the
-                # maximum cs between the layer and any of its sources.
-                max_cs = max(cs[f])
-                tresh_fract = 0.33
-                for c in range(len(cs[f])):
-                    if cs[f][c]/max_cs > tresh_fract:
-                        connections_to_keep[f].append(c)
-            # rebuilding the network
-            print(connections_to_keep)
-            # self.output = self.add_pruned_block(
-            #     self.input_last_b, self.total_blocks-1, self.growth_rate,
-            #     connections_to_keep)
-            # go to the next stage
-            self.algorithm_stage += 1
-
-        # stage #3 = recovery stage
-        if self.algorithm_stage == 3:
-            # stop algorithm and reset algorithm stage
-            continue_training = False
-            self.algorithm_stage = 0
 
         return continue_training
 
@@ -1826,3 +1751,4 @@ class DenseNet:
         total_training_time = time.time() - total_start_time
         print("\nTotal training time: %s" % str(timedelta(
             seconds=total_training_time)))
+        self._count_useful_trainable_params()
