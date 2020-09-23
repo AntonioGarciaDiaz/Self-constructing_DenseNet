@@ -1,7 +1,10 @@
 import argparse
 import os
 
-from models.dense_net import DenseNet
+# from models.OLD_dense_net import DenseNet
+# from models.dense_net import DenseNet
+# from models.NEW_dense_net import DenseNet
+from models.NEWER_dense_net import DenseNet
 from data_providers.utils import get_data_provider_by_name
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
@@ -63,7 +66,7 @@ if __name__ == '__main__':
     parser.add_argument(
         '--growth_rate', '-k', type=int,
         default=12,  # choices in paper: 12, 24, 40.
-        help='Growth rate (number of new convolutions per dense layer).')
+        help='Growth rate (number of convolutions in a new dense layer).')
     parser.add_argument(
         '--dataset', '-ds', type=str,
         choices=['C10', 'C10+', 'C100', 'C100+', 'SVHN'],
@@ -174,6 +177,11 @@ if __name__ == '__main__':
              ' for deciding if the ascension stage should be forcefully'
              ' terminated (this happens when the std of these accuracy'
              ' values is below std_tolerance)')
+    parser.add_argument(
+        '--expansion_rate', '-kex', type=int,
+        default=1,  # by default, convolutions are added one by one
+        help='Expansion rate (rate at which new convolutions are added'
+             ' together during the self-construction of a dense layer).')
 
     # Wether or not to write TensorFlow logs.
     parser.add_argument(

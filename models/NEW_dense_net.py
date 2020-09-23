@@ -137,6 +137,8 @@ class DenseNet:
                 self.self_constructing_step = self.self_constructing_var2
             else:
                 self.self_constructing_step = self.self_constructing_var3
+            # else:
+            #     self.self_constructing_step = self.self_constructing_var_test
 
             # Choice of the self-constructing learning rate reduction variant.
             if self_constr_rlr == 0:
@@ -714,6 +716,54 @@ class DenseNet:
         output = tf.nn.conv2d(_input, filter_ref, strides, padding)
         return output, filter_ref
 
+    def conv2d_with_kernels(self, _input, out_features, kernel_size,
+                            strides=[1, 1, 1, 1], padding='SAME'):
+        """
+        Creates a 2d convolutional filter layer, by producing a list of 3d
+        kernels and then stacking them together to create the filter.
+        Returns the output of the layer and a reference to its convolutional
+        filter, as well as the newly generated list of kernels.
+
+        Args:
+            _input: tensor, the operation's input;
+            out_features: `int`, number of feature maps at the output;
+            kernel_size: `int`, size of the square kernels (their side);
+            strides: `list` of `int`, strides in each direction for kernels;
+            padding: `str`, should we use padding ('SAME') or not ('VALID').
+        """
+        in_features = int(_input.get_shape()[-1])
+        # First create a list with the 3d kernels (easily modifiable):
+        kernels = []
+        for o in range(out_features):
+            kernels.append(self.weight_variable_msra(
+                [kernel_size, kernel_size, in_features], name='kernel'+str(o)))
+        # The kernels are stacked together so as to create a 4d filter
+        # (dimension 3 = output features).
+        filter_ref = tf.stack(kernels, axis=3, name='filter')
+        # Using the filter, the convolution is defined.
+        output = tf.nn.conv2d(_input, filter_ref, strides, padding)
+        return output, filter_ref, kernels
+
+    def conv2d_with_given_kernels(self, _input, kernels,
+                                  strides=[1, 1, 1, 1], padding='SAME'):
+        """
+        Creates a 2d convolutional filter layer, by using a given list of 3d
+        kernels to create a filter (stacking them together).
+        Returns the output of the layer and a reference to its filter.
+
+        Args:
+            _input: tensor, the operation's input;
+            kernels: `list` of tensors, contains each of the kernels from which
+                the convolution will be built;
+            strides: `list` of `int`, strides in each direction for kernels;
+            padding: `str`, should we use padding ('SAME') or not ('VALID').
+        """
+        # The kernels are stacked together so as to create a 4d filter.
+        # Using the same name = good idea?
+        filter_ref = tf.stack(kernels, axis=3, name='filter')
+        output = tf.nn.conv2d(_input, filter_ref, strides, padding)
+        return output, filter_ref
+
     def dropout(self, _input):
         """
         If the given keep_prob is not 1 AND if the graph is being trained,
@@ -773,7 +823,9 @@ class DenseNet:
         - ReLU activation function;
         - 2d convolution, with required kernel size (side);
         - dropout, if required (training the graph and keep_prob not set to 1).
-        Returns the output tensor and a reference to the 2d convolution filter.
+        Returns the output tensor and a reference to the 2d convolution filter,
+        as well as a list of the kernels in that filter, and the input tensor
+        for the 2d convolution.
 
         Args:
             _input: tensor, the operation's input;
@@ -782,14 +834,30 @@ class DenseNet:
         """
         with tf.variable_scope("composite_function"):
             # batch normalisation
-            output = self.batch_norm(_input)
+            in_cv = self.batch_norm(_input)
             # ReLU activation function
-            output = tf.nn.relu(output)
+            in_cv = tf.nn.relu(in_cv)
             # 2d convolution
-            output, filter_ref = self.conv2d(
-                output, out_features=out_features, kernel_size=kernel_size)
+            output, filter_ref, kernels = self.conv2d_with_kernels(
+                in_cv, out_features=out_features, kernel_size=kernel_size)
             # dropout (if the graph is being trained and keep_prob is not 1)
             output = self.dropout(output)
+        return output, filter_ref, kernels, in_cv
+
+    def reconstruct_composite_function(self, in_cv, kernels):
+        """
+        Reconstruct the output of the composite function H_l([x_0, ..., x_l-1])
+        for a dense layer, given the convolution's input and its kernels.
+
+        Args:
+            in_cv: tensor, the input of the convolution;
+            kernels: `list` of tensors, the kernels for the convolution.
+        """
+        # 2d convolution
+        output, filter_ref = self.conv2d_with_given_kernels(
+            in_cv, kernels)
+        # dropout
+        output = self.dropout(output)
         return output, filter_ref
 
     def bottleneck(self, _input, out_features):
@@ -826,6 +894,45 @@ class DenseNet:
     # BLOCKS AND THEIR INTERNAL LAYERS ----------------------------------------
     # -------------------------------------------------------------------------
 
+    def add_new_kernels_to_layer(self, _input, in_cv, layer, kernel_num,
+                                 kernel_size=3):
+        """
+        Adds new convolution kernels to a layer within a block:
+        creates the kernels, reconstructs the composite function, and
+        concatenates outputs to ensure the DenseNet paradigm.
+        Returns the layer's new output tensor.
+        N.B.: This function is meant to be used ONLY in self-constructing mode
+            (i.e. when should_self_construct is true).
+
+        Args:
+            _input: tensor, the layer's input;
+            in_cv: tensor, the input for the layer's convolution;
+            layer: `int`, identifier number for this layer (within a block);
+            kernel_num: `int`, number of new (square) kernels to be added.
+            kernel_size: `int`, size of the kernels (their side);
+        """
+        with tf.variable_scope("layer_%d" % layer):
+            with tf.variable_scope("composite_function"):
+                # create kernel_num new kernels
+                in_features = int(in_cv.get_shape()[-1])
+                for new_k in range(kernel_num):
+                    self.kernels_ref_list[-1][-1].append(
+                        self.weight_variable_msra(
+                            [kernel_size, kernel_size, in_features],
+                            name='kernel'+str(
+                                len(self.kernels_ref_list[-1][-1])+new_k)))
+                # reconstruct the composite function from the current kernels
+                comp_out, filter_ref = self.reconstruct_composite_function(
+                    in_cv, self.kernels_ref_list[-1][-1])
+                # save a reference to the composite function's filter
+                self.filter_ref_list[-1][-1] = filter_ref
+            # concatenate output with layer input to ensure DenseNet paradigm
+            if TF_VERSION[0] >= 1 and TF_VERSION[1] >= 0:
+                output = tf.concat(axis=3, values=(_input, comp_out))
+            else:
+                output = tf.concat(3, (_input, comp_out))
+        return output
+
     def add_internal_layer(self, _input, layer, growth_rate):
         """
         Adds a new convolutional (dense) layer within a block.
@@ -835,6 +942,8 @@ class DenseNet:
         It will then concatenate x_l with the layer's input: all the outputs of
         the previous layers, resulting in [x_0, ..., x_l-1, x_l].
 
+        Returns the layer's output, as well as the input of its conv2d.
+
         Args:
             _input: tensor, the operation's input;
             layer: `int`, identifier number for this layer (within a block);
@@ -843,7 +952,7 @@ class DenseNet:
         with tf.variable_scope("layer_%d" % layer):
             # use the composite function H_l (3x3 kernel conv)
             if not self.bc_mode:
-                comp_out, filter_ref = self.composite_function(
+                comp_out, filter_ref, kernels, in_cv = self.composite_function(
                     _input, out_features=growth_rate, kernel_size=3)
             # in DenseNet-BC mode, add a bottleneck layer before H_l (1x1 conv)
             elif self.bc_mode:
@@ -851,23 +960,26 @@ class DenseNet:
                     _input, out_features=growth_rate)
                 if self.ft_filters or self.should_self_construct:
                     self.filter_ref_list[-1].append(filter_ref)
-                comp_out, filter_ref = self.composite_function(
+                comp_out, filter_ref, kernels, in_cv = self.composite_function(
                     bottleneck_out, out_features=growth_rate, kernel_size=3)
             # save a reference to the composite function's filter
             if self.ft_filters or self.should_self_construct:
                 self.filter_ref_list[-1].append(filter_ref)
+                self.kernels_ref_list[-1].append(kernels)
             # concatenate output of H_l with layer input (all previous outputs)
             if TF_VERSION[0] >= 1 and TF_VERSION[1] >= 0:
                 output = tf.concat(axis=3, values=(_input, comp_out))
             else:
                 output = tf.concat(3, (_input, comp_out))
-        return output
+        return output, in_cv
 
     def add_block(self, _input, block, growth_rate, layers_in_block, is_last):
         """
         Adds a new block containing several convolutional (dense) layers.
         These are connected together following a DenseNet architecture,
         as defined in the paper.
+        Returns the block's output, as well as the inputs to the last layer
+        and to its conv2d.
 
         Args:
             _input: tensor, the operation's input;
@@ -878,13 +990,18 @@ class DenseNet:
         """
         if self.ft_filters or self.should_self_construct:
             self.filter_ref_list.append([])
+            self.kernels_ref_list.append([])
         if is_last:
             self.cross_entropy = []
 
         with tf.variable_scope("Block_%d" % block) as self.current_block:
             output = _input
             for layer in range(layers_in_block):
-                output = self.add_internal_layer(output, layer, growth_rate)
+                # The inputs of the last layer and its conv2d must be saved
+                # (useful for self-construction kernel by kernel)
+                input_lt_lay = output
+                output, input_lt_cnv = self.add_internal_layer(
+                    input_lt_lay, layer, growth_rate)
 
                 if self.ft_cross_entropies and is_last:
                     # Save the cross-entropy for all layers except the last one
@@ -893,7 +1010,8 @@ class DenseNet:
                         _, cross_entropy = self.cross_entropy_loss(
                             output, self.labels, block, layer)
                         self.cross_entropy.append(cross_entropy)
-        return output
+
+        return output, input_lt_lay, input_lt_cnv
 
     # TRANSITION LAYERS -------------------------------------------------------
     # -------------------------------------------------------------------------
@@ -918,11 +1036,12 @@ class DenseNet:
             # add feature map compression in DenseNet-BC mode
             out_features = int(int(_input.get_shape()[-1]) * self.reduction)
             # use the composite function H_l (1x1 kernel conv)
-            output, filter_ref = self.composite_function(
+            output, filter_ref, kernels, in_cv = self.composite_function(
                 _input, out_features=out_features, kernel_size=1)
             # save a reference to the composite function's filter
             if self.ft_filters or self.should_self_construct:
                 self.filter_ref_list[-1].append(filter_ref)
+                self.kernels_ref_list[-1].append(kernels)
             # use average pooling to reduce feature map size
             output = self.avg_pool(output, k=2)
         return output
@@ -944,29 +1063,95 @@ class DenseNet:
             block: `int`, identifier number for the last block;
             layer: `int`, identifier number for the last layer in that block.
         """
-        with tf.variable_scope("Transition_to_classes_block_%d_layer_%d" %
-                               (block, layer)):
-            # batch normalisation
-            output = self.batch_norm(_input)
-            # ReLU activation function
+        self.features_total = int(_input.get_shape()[-1])
+        with tf.variable_scope("Transition_to_FC_block_%d_layer_%d" %
+                               (block, layer), reuse=tf.AUTO_REUSE):
+            # Batch normalisation.
+            output = self.batch_norm(
+                _input, scope='BatchNorm'+str(self.features_total))
+            # ReLU activation function.
             output = tf.nn.relu(output)
-            # wide average pooling
+            # Wide average pooling.
             last_pool_kernel = int(output.get_shape()[-2])
             output = self.avg_pool(output, k=last_pool_kernel)
-            # reshaping the output into 1d
+            # Reshaping the output into 1d.
+            output = tf.reshape(output, [-1, self.features_total])
+        # FC (fully-connected) layer.
+        self.FC_W = []
+        for i in range(self.features_total):
+            self.FC_W.append(self.weight_variable_xavier(
+                [self.n_classes], name="FC_b%d_l%d_W%d" % (block, layer, i)))
+        self.FC_bias = self.bias_variable(
+            [self.n_classes], name="FC_b%d_l%d_bias" % (block, layer))
+        stacked_FC_W = tf.stack(self.FC_W, axis=0)
+        logits = tf.matmul(output, stacked_FC_W) + self.FC_bias
+        return logits
+
+    def reconstruct_transition_to_classes(self, _input, block, layer):
+        """
+        Reconstruct the transition layer to classes after adding a new kernel
+        to the last layer in the last block (in such a case, the transition
+        layer must remain mostly unchanged).
+
+        Args:
+            _input: tensor, the operation's input;
+            block: `int`, identifier number for the last block;
+            layer: `int`, identifier number for the last layer in that block.
+        """
+        new_features_total = int(_input.get_shape()[-1])
+        with tf.variable_scope("Transition_to_FC_block_%d_layer_%d" %
+                               (block, layer), reuse=tf.AUTO_REUSE):
+            # The batch norm contains beta and gamma params for each kernel,
+            # we first copy the param values from old kernels.
+            beta_values = self.sess.run(
+                tf.get_variable("BatchNorm"+str(self.features_total)+"/beta",
+                                [self.features_total]))
+            gamma_values = self.sess.run(
+                tf.get_variable("BatchNorm"+str(self.features_total)+"/gamma",
+                                [self.features_total]))
+            # Then we create a new batch norm and initialize its params.
+            output = self.batch_norm(
+                _input, scope='BatchNorm'+str(new_features_total))
+            new_beta = tf.get_variable(
+                "BatchNorm"+str(new_features_total)+"/beta",
+                [new_features_total])
+            new_gamma = tf.get_variable(
+                "BatchNorm"+str(new_features_total)+"/gamma",
+                [new_features_total])
+            self.sess.run(tf.variables_initializer([new_beta, new_gamma]))
+            # For these params, we copy the old param values, and leave
+            # the remaining new values for the new kernels.
+            new_beta_values = self.sess.run(new_beta)
+            new_gamma_values = self.sess.run(new_gamma)
+            difference = new_features_total-self.features_total
+            new_beta_values[:-difference] = beta_values
+            new_gamma_values[:-difference] = gamma_values
+            # Then we assign the modified values to reconstruct the batch norm.
+            self.sess.run(new_beta.assign(new_beta_values))
+            self.sess.run(new_gamma.assign(new_gamma_values))
+            self.features_total = new_features_total
+
+            # ReLU, average pooling, and reshaping into 1d
+            # these do not contain any trainable params, so they are rewritten.
+            output = tf.nn.relu(output)
+            last_pool_kernel = int(output.get_shape()[-2])
+            output = self.avg_pool(output, k=last_pool_kernel)
             features_total = int(output.get_shape()[-1])
             output = tf.reshape(output, [-1, features_total])
-            # fully-connected layer
-            W = self.weight_variable_xavier(
-                [features_total, self.n_classes], name='W')
-            bias = self.bias_variable([self.n_classes])
-            logits = tf.matmul(output, W) + bias
+
+        # For the FC layer: add new weights, keep biases and old weights.
+        for i in range(len(self.FC_W), features_total):
+            self.FC_W.append(self.weight_variable_xavier(
+                [self.n_classes], name="FC_b%d_l%d_W%d" % (block, layer, i)))
+        stacked_FC_W = tf.stack(self.FC_W, axis=0)
+        logits = tf.matmul(output, stacked_FC_W) + self.FC_bias
         return logits
 
     # END GRAPH OPERATIONS ----------------------------------------------------
     # -------------------------------------------------------------------------
 
-    def cross_entropy_loss(self, _input, labels, block, layer):
+    def cross_entropy_loss(self, _input, labels, block, layer,
+                           preserve_transition=False):
         """
         Takes an input and adds a transition layer to obtain predictions for
         classes. Then calculates the cross-entropy loss for that input with
@@ -978,9 +1163,16 @@ class DenseNet:
             labels: tensor, the expected labels (classes) for the data;
             block: `int`, identifier number for the last block;
             layer: `int`, identifier number for the last layer in that block.
+            preserve_transition: `bool`, whether or not to preserve the
+                transition to classes (if yes, adapts the previous transition,
+                otherwise creates a new one).
         """
         # add the FC transition layer to the classes (+ softmax).
-        logits = self.transition_layer_to_classes(_input, block, layer)
+        if preserve_transition:
+            logits = self.reconstruct_transition_to_classes(_input, block,
+                                                            layer)
+        else:
+            logits = self.transition_layer_to_classes(_input, block, layer)
         prediction = tf.nn.softmax(logits)
 
         # set the calculation for the losses (cross_entropy and l2_loss)
@@ -995,26 +1187,32 @@ class DenseNet:
 
         return prediction, cross_entropy
 
-    def _define_end_graph_operations(self):
+    def _define_end_graph_operations(self, preserve_transition=False):
         """
         Adds the last layer on top of the (editable portion of the) graph.
         Then defines the operations for cross-entropy, the training step,
         and the accuracy.
+
+        Args:
+            preserve_transition: `bool`, whether or not to preserve the
+                transition to classes (if yes, adapts the previous transition,
+                otherwise creates a new one).
         """
         # obtain the predicted logits, set the calculation for the losses
         # (cross_entropy and l2_loss)
         prediction, cross_entropy = self.cross_entropy_loss(
             self.output, self.labels, self.total_blocks-1,
-            self.layer_num_list[-1]-1)
+            self.layer_num_list[-1]-1, preserve_transition)
         self.cross_entropy.append(cross_entropy)
+        var_list = self.get_useful_variables()
         l2_loss = tf.add_n(
-            [tf.nn.l2_loss(var) for var in tf.trainable_variables()])
+            [tf.nn.l2_loss(var) for var in var_list])
 
         # set the optimizer and define the training step
         optimizer = tf.train.MomentumOptimizer(
             self.learning_rate, self.nesterov_momentum, use_nesterov=True)
         self.train_step = optimizer.minimize(
-            cross_entropy + l2_loss * self.weight_decay)
+            cross_entropy + l2_loss * self.weight_decay, var_list=var_list)
 
         # set the calculation for the accuracy
         correct_prediction = tf.equal(
@@ -1024,6 +1222,32 @@ class DenseNet:
 
     # MAIN GRAPH BUILDING FUNCTIONS -------------------------------------------
     # -------------------------------------------------------------------------
+
+    def _new_kernels_to_last_layer(self):
+        """
+        Add new convolution kernels to the current last layer.
+        The number of kernels to be added is given by the expansion_rate param.
+        """
+        # safely access the current block's variable scope
+        with tf.variable_scope(self.current_block,
+                               auxiliary_name_scope=False) as cblock_scope:
+            with tf.name_scope(cblock_scope.original_name_scope):
+                # Add the layer and save the new relevant inputs and outputs
+                self.output = self.add_new_kernels_to_layer(
+                    self.input_lt_lay, self.input_lt_cnv,
+                    self.layer_num_list[-1]-1, self.expansion_rate)
+
+        # Delete the last cross-entropy from the list, we will recreate it.
+        del self.cross_entropy[-1]
+
+        print("ADDED A NEW KERNEL TO LAYER #%d (BLOCK #%d)! "
+              "It now has got %d kernels." %
+              (self.layer_num_list[-1]-1, self.total_blocks-1,
+               len(self.kernels_ref_list[-1][-1])))
+
+        self._define_end_graph_operations(preserve_transition=True)
+        self._initialize_uninitialized_variables()
+        self._count_useful_trainable_params()
 
     def _new_layer(self):
         """
@@ -1035,8 +1259,11 @@ class DenseNet:
         with tf.variable_scope(self.current_block,
                                auxiliary_name_scope=False) as cblock_scope:
             with tf.name_scope(cblock_scope.original_name_scope):
-                self.output = self.add_internal_layer(
-                    self.output, self.layer_num_list[-1], self.growth_rate)
+                # Add the layer and save the new relevant inputs and outputs
+                self.input_lt_lay = self.output
+                self.output, self.input_lt_cnv = self.add_internal_layer(
+                    self.input_lt_lay, self.layer_num_list[-1],
+                    self.growth_rate)
         self.layer_num_list[-1] += 1
 
         # Refresh the cross-entropy list if not measuring layer cross-entropies
@@ -1045,11 +1272,11 @@ class DenseNet:
 
         if not self.bc_mode:
             print("ADDED A NEW LAYER to the last block (#%d)! "
-                  "It now has got %d layers" %
+                  "It now has got %d layers." %
                   (self.total_blocks-1, self.layer_num_list[-1]))
         if self.bc_mode:
             print("ADDED A NEW PAIR OF LAYERS to the last block (#%d)! "
-                  "It now has got %d bottleneck and composite layers" %
+                  "It now has got %d bottleneck and composite layers." %
                   (self.total_blocks-1, self.layer_num_list[-1]))
 
         self.update_paths()
@@ -1064,10 +1291,12 @@ class DenseNet:
         In DenseNet-BC mode, the new module will begin with two layers
         (bottleneck and compression) instead of just one.
         """
-        self.last_block_in = self.transition_layer(
+        # The input of the last block is useful if the block must be ditched
+        self.input_lt_blc = self.transition_layer(
             self.output, self.total_blocks-1)
-        self.output = self.add_block(
-            self.last_block_in, self.total_blocks, self.growth_rate, 1, True)
+        # The inputs of the last layer and conv are for kernel-wise self-constr
+        self.output, self.input_lt_lay, self.input_lt_cnv = self.add_block(
+            self.input_lt_blc, self.total_blocks, self.growth_rate, 1, True)
         self.layer_num_list.append(1)
         self.total_blocks += 1
 
@@ -1102,20 +1331,21 @@ class DenseNet:
 
         # first add a 3x3 convolution layer with first_output_features outputs
         with tf.variable_scope("Initial_convolution"):
-            self.last_block_in, filter_ref = self.conv2d(
+            self.input_lt_blc, filter_ref = self.conv2d(
                 self.output, out_features=self.first_output_features,
                 kernel_size=3)
             if self.ft_filters or self.should_self_construct:
                 self.filter_ref_list = [[filter_ref]]
+                self.kernels_ref_list = []
 
-        # then add the required blocks
+        # then add the required blocks (and save the relevant inputs)
         for block in range(self.total_blocks):
-            self.output = self.add_block(
-                self.last_block_in, block, growth_rate,
+            self.output, self.input_lt_lay, self.input_lt_cnv = self.add_block(
+                self.input_lt_blc, block, growth_rate,
                 layers_in_each_block[block], block == self.total_blocks - 1)
             #  all blocks except the last have transition layers
             if block != self.total_blocks - 1:
-                self.last_block_in = self.transition_layer(self.output, block)
+                self.input_lt_blc = self.transition_layer(self.output, block)
 
         self._define_end_graph_operations()
 
@@ -1205,7 +1435,7 @@ class DenseNet:
         parameters in the graph, as well as the number of parameters that are
         currently 'useful'. By 'useful' parameters are meant the multiplied
         dimensions of each TF variable that is not a discarded transition to
-        classes.
+        classes or batch normalization.
         The method prints not only the number of parameters, but also the
         number of parameters in the convolutional and fully connected parts
         of the TensorFlow graph.
@@ -1213,10 +1443,13 @@ class DenseNet:
         total_parameters = 0
         useful_conv_params = 0
         useful_fc_params = 0
-        fc_name = "Transition_to_classes_block_"
-        true_fc_name = fc_name + "%d_layer_%d" % (self.total_blocks-1,
-                                                  self.layer_num_list[-1]-1)
-        true_fc_batchnorm_name = true_fc_name + "/BatchNorm"
+        fc_name = 'FC_'
+        t2fc_name = 'Transition_to_FC_'
+        true_fc_name = 'FC_b%d_l%d' % (
+            self.total_blocks-1, self.layer_num_list[-1]-1)
+        true_t2fc_name = 'Transition_to_FC_block_%d_layer_%d/BatchNorm%d' % (
+            self.total_blocks-1, self.layer_num_list[-1]-1,
+            self.features_total)
 
         # print("Variable names:")
         for variable in tf.trainable_variables():
@@ -1227,17 +1460,16 @@ class DenseNet:
                 variable_parameters *= dim.value
             # Add all identified parameters to total_parameters.
             total_parameters += variable_parameters
-            # Add params not in Transition_to_classes to useful_conv_params.
-            if not variable.name.startswith(fc_name):
+            # Add params from the current FC layer to useful_fc_params.
+            if variable.name.startswith(true_fc_name):
+                useful_fc_params += variable_parameters
+            # Add params from the current batchnorm to useful_conv_params.
+            elif variable.name.startswith(true_t2fc_name):
                 useful_conv_params += variable_parameters
-            # For the true Transition_to_classes (the last one):
-            elif variable.name.startswith(true_fc_name):
-                # If part of the batchnorm, then add to useful_conv_params.
-                if variable.name.startswith(true_fc_batchnorm_name):
-                    useful_conv_params += variable_parameters
-                # Otherwise, add to useful_fc_params.
-                else:
-                    useful_fc_params += variable_parameters
+            # Add params not in a rejected batchnorm or FC layer (to conv).
+            elif (not variable.name.startswith(fc_name) and
+                  not variable.name.startswith(t2fc_name)):
+                useful_conv_params += variable_parameters
         # Add the two useful parameters counts together.
         total_useful_parameters = useful_conv_params + useful_fc_params
 
@@ -1245,6 +1477,39 @@ class DenseNet:
         print("Total useful params: %.1fk" % (total_useful_parameters / 1e3))
         print("\tConvolutional: %.1fk" % (useful_conv_params / 1e3))
         print("\tFully Connected: %.1fk" % (useful_fc_params / 1e3))
+
+    def get_useful_variables(self):
+        """
+        Get a list of the trainable variables in the graph that are currently
+        'useful' (all variables except those in discarded transitions to
+        classes or batch normalizations).
+        """
+        useful_vars = []
+        fc_name = 'FC_'
+        t2fc_name = 'Transition_to_FC_'
+        true_fc_name = 'FC_b%d_l%d' % (
+            self.total_blocks-1, self.layer_num_list[-1]-1)
+        true_t2fc_name = 'Transition_to_FC_block_%d_layer_%d/BatchNorm%d' % (
+            self.total_blocks-1, self.layer_num_list[-1]-1,
+            self.features_total)
+
+        for variable in tf.trainable_variables():
+            # Add variables from the current FC layer.
+            if variable.name.startswith(true_fc_name):
+                useful_vars.append(variable)
+            # Add variables from the current batchnorm.
+            elif variable.name.startswith(true_t2fc_name):
+                useful_vars.append(variable)
+            # Add variables not in a rejected batchnorm or FC layer.
+            elif (not variable.name.startswith(fc_name) and
+                  not variable.name.startswith(t2fc_name)):
+                useful_vars.append(variable)
+
+        # print("Useful variables:")
+        # for var in useful_vars:
+        #     print(var.name)
+
+        return useful_vars
 
     # -------------------------------------------------------------------------
     # -------------------- TRAINING AND TESTING THE MODEL ---------------------
@@ -1502,6 +1767,42 @@ class DenseNet:
                 self.max_n_ep = epoch + self.patience_param
             else:
                 self.patience_cntdwn -= 1
+
+        return continue_training
+
+    def self_constructing_var_test(self, epoch):
+        """
+        A step of the self-constructing algorithm (var_test) for one
+        training epoch.
+        THIS IS AN EXPERIMENTAL VARIANT, ONLY TO TEST KERNEL-WISE
+        IMPLEMENTATION FUNCTIONS.
+
+        Args:
+            epoch: `int`, current training epoch (since adding the last block).
+        """
+        continue_training = True
+        cs, lcs_dst, lcs_src = self.process_block_filters(
+            self.total_blocks-1, epoch)
+
+        # calculate number of settled layers (layers with lcs_src == 1)
+        settled_layers = 0
+        for src in range(1, len(lcs_src)):
+            if lcs_src[src] >= 1:
+                settled_layers += 1
+
+        # stage #0 = ascension stage
+        if self.algorithm_stage == 0:
+            if (epoch-1) % self.asc_thresh == 0:
+                self._new_layer()
+            elif (epoch-1) % int(2) == 0:
+                self._new_kernels_to_last_layer()
+
+        # stage #1 = improvement stage
+        if self.algorithm_stage == 1:
+            if epoch >= self.max_n_ep:
+                # stop algorithm and reset everything
+                continue_training = False
+                self.algorithm_stage = 0
 
         return continue_training
 
